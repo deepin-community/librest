@@ -32,11 +32,13 @@ main (int argc, char **argv)
   RestXmlNode *root, *node;
   char *xml;
 
-#if !GLIB_CHECK_VERSION (2, 36, 0)
-  g_type_init ();
-#endif
-
   parser = rest_xml_parser_new ();
+
+  root = rest_xml_parser_parse_from_data (parser, "", -1);
+  g_assert (root == NULL);
+
+  root = rest_xml_parser_parse_from_data (parser, "<invalid", -1);
+  g_assert (root == NULL);
 
   root = rest_xml_parser_parse_from_data (parser, TEST_XML, strlen (TEST_XML));
   g_assert (root);
@@ -53,6 +55,7 @@ main (int argc, char **argv)
                TEST_XML, xml);
     }
 
+  g_free (xml);
   rest_xml_node_unref (root);
 
   root = rest_xml_node_add_child (NULL, "node0");
@@ -79,7 +82,9 @@ main (int argc, char **argv)
                TEST_XML, xml);
     }
 
+  g_free (xml);
   rest_xml_node_unref (root);
+  g_object_unref (parser);
 
   return 0;
 }

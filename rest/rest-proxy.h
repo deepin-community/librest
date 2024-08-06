@@ -31,33 +31,13 @@
 G_BEGIN_DECLS
 
 #define REST_TYPE_PROXY rest_proxy_get_type()
-
-#define REST_PROXY(obj) \
-  (G_TYPE_CHECK_INSTANCE_CAST ((obj), REST_TYPE_PROXY, RestProxy))
-
-#define REST_PROXY_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_CAST ((klass), REST_TYPE_PROXY, RestProxyClass))
-
-#define REST_IS_PROXY(obj) \
-  (G_TYPE_CHECK_INSTANCE_TYPE ((obj), REST_TYPE_PROXY))
-
-#define REST_IS_PROXY_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_TYPE ((klass), REST_TYPE_PROXY))
-
-#define REST_PROXY_GET_CLASS(obj) \
-  (G_TYPE_INSTANCE_GET_CLASS ((obj), REST_TYPE_PROXY, RestProxyClass))
-
-typedef struct _RestProxy RestProxy;
-typedef struct _RestProxyClass RestProxyClass;
+G_DECLARE_DERIVABLE_TYPE (RestProxy, rest_proxy, REST, PROXY, GObject)
 
 /**
  * RestProxy:
  *
  * #RestProxy has no publicly available members.
  */
-struct _RestProxy {
-  GObject parent;
-};
 
 /**
  * RestProxyClass:
@@ -97,6 +77,8 @@ struct _RestProxyClass {
  * @REST_PROXY_ERROR_SSL: SSL
  * @REST_PROXY_ERROR_IO: Input/Output
  * @REST_PROXY_ERROR_FAILED: Failure
+ * @REST_PROXY_ERROR_URL_INVALID: Invalid URL
+ * @REST_PROXY_ERROR_BINDING_REQUIRED: URL requires binding
  * @REST_PROXY_ERROR_HTTP_MULTIPLE_CHOICES: HTTP/Multiple choices
  * @REST_PROXY_ERROR_HTTP_MOVED_PERMANENTLY: HTTP/Moved permanently
  * @REST_PROXY_ERROR_HTTP_FOUND: HTTP/Found
@@ -139,6 +121,8 @@ typedef enum {
   REST_PROXY_ERROR_SSL,
   REST_PROXY_ERROR_IO,
   REST_PROXY_ERROR_FAILED,
+  REST_PROXY_ERROR_URL_INVALID,
+  REST_PROXY_ERROR_BINDING_REQUIRED,
 
   REST_PROXY_ERROR_HTTP_MULTIPLE_CHOICES                = 300,
   REST_PROXY_ERROR_HTTP_MOVED_PERMANENTLY               = 301,
@@ -176,43 +160,32 @@ typedef enum {
 
 GQuark rest_proxy_error_quark (void);
 
-GType rest_proxy_get_type (void);
-
-RestProxy *rest_proxy_new (const gchar *url_format, 
-                           gboolean     binding_required);
-
-RestProxy *
-rest_proxy_new_with_authentication (const gchar *url_format,
-                                    gboolean     binding_required,
-                                    const gchar *username,
-                                    const gchar *password);
-
-gboolean rest_proxy_bind (RestProxy *proxy,
-                          ...);
-
-gboolean rest_proxy_bind_valist (RestProxy *proxy,
-                                 va_list    params);
-
-void rest_proxy_set_user_agent (RestProxy *proxy, const char *user_agent);
-
-const gchar *rest_proxy_get_user_agent (RestProxy *proxy);
-
-void rest_proxy_add_soup_feature (RestProxy *proxy,
-                                  SoupSessionFeature *feature);
-
-RestProxyCall *rest_proxy_new_call (RestProxy *proxy);
-
-G_GNUC_NULL_TERMINATED
-gboolean rest_proxy_simple_run (RestProxy *proxy, 
-                                gchar    **payload, 
-                                goffset   *len,
-                                GError   **error,
-                                ...);
-gboolean rest_proxy_simple_run_valist (RestProxy *proxy, 
-                                       gchar    **payload, 
-                                       goffset   *len,
-                                       GError   **error,
-                                       va_list    params);
+RestProxy     *rest_proxy_new                     (const gchar         *url_format,
+                                                   gboolean             binding_required);
+RestProxy     *rest_proxy_new_with_authentication (const gchar         *url_format,
+                                                   gboolean             binding_required,
+                                                   const gchar         *username,
+                                                   const gchar         *password);
+gboolean       rest_proxy_bind                    (RestProxy           *proxy,
+                                                   ...);
+gboolean       rest_proxy_bind_valist             (RestProxy           *proxy,
+                                                   va_list              params);
+void           rest_proxy_set_user_agent          (RestProxy           *proxy,
+                                                   const char          *user_agent);
+const gchar   *rest_proxy_get_user_agent          (RestProxy           *proxy);
+void           rest_proxy_add_soup_feature        (RestProxy           *proxy,
+                                                   SoupSessionFeature  *feature);
+RestProxyCall *rest_proxy_new_call                (RestProxy           *proxy);
+gboolean       rest_proxy_simple_run              (RestProxy           *proxy,
+                                                   gchar              **payload,
+                                                   goffset             *len,
+                                                   GError             **error,
+                                                   ...) G_GNUC_NULL_TERMINATED;
+gboolean       rest_proxy_simple_run_valist       (RestProxy           *proxy,
+                                                   gchar              **payload,
+                                                   goffset             *len,
+                                                   GError             **error,
+                                                   va_list              params);
 G_END_DECLS
 
 #endif /* _REST_PROXY */

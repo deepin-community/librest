@@ -1,0 +1,14 @@
+Overview of changes for 0.91
+============================
+* removed RestAuth object
+* added an demo application to showcase librest
+* removed OAuth1 Proxy
+* added soupapiversion to pkg-config file in order to check the which soup version
+  this library got built with
+* build against libsoup3 by default
+
+Overview of changes for 0.9
+===========================
+* new oauth2 proxy to accomplish pkce workflow with api endpoints
+* introduced meson as buildsystem
+* introduced the possibility to build librest with soup-2.4 or soup-3.0

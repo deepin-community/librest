@@ -28,18 +28,14 @@
 #define SECRET "7db227a36b3154e3a3306a23754de1d7"
 #define USERNAME "rossburton"
 
-int
-main (int argc, char **argv)
+static void
+test_lastfm ()
 {
   RestProxy *proxy;
   RestProxyCall *call;
   GError *error = NULL;
   RestXmlParser *parser;
   RestXmlNode *root, *u_node, *node;
-
-#if !GLIB_CHECK_VERSION (2, 36, 0)
-  g_type_init ();
-#endif
 
   /* Create the proxy */
   proxy = lastfm_proxy_new (API_KEY, SECRET);
@@ -56,14 +52,15 @@ main (int argc, char **argv)
   call = rest_proxy_new_call (proxy);
   rest_proxy_call_set_function (call, "user.getInfo");
   rest_proxy_call_add_param (call, "user", USERNAME);
-  if (!rest_proxy_call_sync (call, &error))
-    g_error ("Cannot make call: %s", error->message);
+  rest_proxy_call_sync (call, &error);
+
+  g_assert_no_error (error);
 
   parser = rest_xml_parser_new ();
   root = rest_xml_parser_parse_from_data (parser,
                                           rest_proxy_call_get_payload (call),
                                           rest_proxy_call_get_payload_length (call));
-  g_assert (root);
+  g_assert_nonnull (root);
   g_assert_cmpstr (root->name, ==, "lfm");
   g_assert_cmpstr (rest_xml_node_get_attr (root, "status"), ==, "ok");
 
@@ -72,10 +69,10 @@ main (int argc, char **argv)
 
   node = rest_xml_node_find (u_node, "id");
   if (node != NULL)
-      g_assert_cmpstr (node->content, ==, "17038");
+    g_assert_cmpstr (node->content, ==, "17038");
 
   node = rest_xml_node_find (u_node, "name");
-  g_assert (node);
+  g_assert_nonnull (node);
   g_assert_cmpstr (node->content, ==, USERNAME);
 
   rest_xml_node_unref (root);
@@ -83,5 +80,14 @@ main (int argc, char **argv)
   g_object_unref (call);
 
   g_object_unref (proxy);
-  return 0;
+}
+
+int
+main (int argc, char **argv)
+{
+  g_test_init (&argc, &argv, NULL);
+
+  g_test_add_func ("/lastm/lastfm", test_lastfm);
+
+  return g_test_run ();
 }

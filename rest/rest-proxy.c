@@ -24,19 +24,12 @@
 #include <string.h>
 
 #include <libsoup/soup.h>
-#if WITH_GNOME
-#include <libsoup/soup-gnome.h>
-#endif
 
 #include "rest-marshal.h"
 #include "rest-proxy-auth-private.h"
 #include "rest-proxy.h"
 #include "rest-private.h"
 
-G_DEFINE_TYPE (RestProxy, rest_proxy, G_TYPE_OBJECT)
-
-#define GET_PRIVATE(o) \
-  (G_TYPE_INSTANCE_GET_PRIVATE ((o), REST_TYPE_PROXY, RestProxyPrivate))
 
 typedef struct _RestProxyPrivate RestProxyPrivate;
 
@@ -48,10 +41,15 @@ struct _RestProxyPrivate {
   gchar *password;
   gboolean binding_required;
   SoupSession *session;
-  SoupSession *session_sync;
   gboolean disable_cookies;
   char *ssl_ca_file;
+#ifndef WITH_SOUP_2
+  gboolean ssl_strict;
+#endif
 };
+
+
+G_DEFINE_TYPE_WITH_PRIVATE (RestProxy, rest_proxy, G_TYPE_OBJECT)
 
 enum
 {
@@ -66,24 +64,14 @@ enum
   PROP_SSL_CA_FILE
 };
 
-enum {
-  AUTHENTICATE,
-  LAST_SIGNAL
-};
-
-static guint signals[LAST_SIGNAL] = { 0 };
-
-
-static gboolean _rest_proxy_simple_run_valist (RestProxy *proxy, 
-                                               char     **payload, 
-                                               goffset   *len,
-                                               GError   **error,
-                                               va_list    params);
-
-static RestProxyCall *_rest_proxy_new_call (RestProxy *proxy);
-
-static gboolean _rest_proxy_bind_valist (RestProxy *proxy,
-                                         va_list    params);
+static gboolean       _rest_proxy_simple_run_valist (RestProxy  *proxy,
+                                                     char      **payload,
+                                                     goffset    *len,
+                                                     GError    **error,
+                                                     va_list     params);
+static RestProxyCall *_rest_proxy_new_call          (RestProxy  *proxy);
+static gboolean       _rest_proxy_bind_valist       (RestProxy  *proxy,
+                                                     va_list     params);
 
 GQuark
 rest_proxy_error_quark (void)
@@ -97,7 +85,8 @@ rest_proxy_get_property (GObject   *object,
                          GValue     *value,
                          GParamSpec *pspec)
 {
-  RestProxyPrivate *priv = GET_PRIVATE (object);
+  RestProxy *self = REST_PROXY (object);
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (self);
 
   switch (property_id) {
     case PROP_URL_FORMAT:
@@ -119,11 +108,15 @@ rest_proxy_get_property (GObject   *object,
       g_value_set_string (value, priv->password);
       break;
     case PROP_SSL_STRICT: {
+#ifdef WITH_SOUP_2
       gboolean ssl_strict;
       g_object_get (G_OBJECT(priv->session),
                     "ssl-strict", &ssl_strict,
                     NULL);
       g_value_set_boolean (value, ssl_strict);
+#else
+      g_value_set_boolean (value, priv->ssl_strict);
+#endif
       break;
     }
     case PROP_SSL_CA_FILE:
@@ -141,7 +134,8 @@ rest_proxy_set_property (GObject      *object,
                          const GValue *value,
                          GParamSpec   *pspec)
 {
-  RestProxyPrivate *priv = GET_PRIVATE (object);
+  RestProxy *self = REST_PROXY (object);
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (self);
 
   switch (property_id) {
     case PROP_URL_FORMAT:
@@ -175,12 +169,13 @@ rest_proxy_set_property (GObject      *object,
       priv->password = g_value_dup_string (value);
       break;
     case PROP_SSL_STRICT:
+#ifdef WITH_SOUP_2
       g_object_set (G_OBJECT(priv->session),
                     "ssl-strict", g_value_get_boolean (value),
                     NULL);
-      g_object_set (G_OBJECT(priv->session_sync),
-                    "ssl-strict", g_value_get_boolean (value),
-                    NULL);
+#else
+      priv->ssl_strict = g_value_get_boolean (value);
+#endif
       break;
     case PROP_SSL_CA_FILE:
       g_free(priv->ssl_ca_file);
@@ -194,35 +189,18 @@ rest_proxy_set_property (GObject      *object,
 static void
 rest_proxy_dispose (GObject *object)
 {
-  RestProxyPrivate *priv = GET_PRIVATE (object);
+  RestProxy *self = REST_PROXY (object);
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (self);
 
-  if (priv->session)
-  {
-    g_object_unref (priv->session);
-    priv->session = NULL;
-  }
-
-  if (priv->session_sync)
-  {
-    g_object_unref (priv->session_sync);
-    priv->session_sync = NULL;
-  }
+  g_clear_object (&priv->session);
 
   G_OBJECT_CLASS (rest_proxy_parent_class)->dispose (object);
 }
 
-static gboolean
-default_authenticate_cb (RestProxy *self,
-                         G_GNUC_UNUSED RestProxyAuth *auth,
-                         gboolean retrying)
-{
-  /* We only want to try the credentials once, otherwise we get in an
-   * infinite loop with failed credentials, retrying the same invalid
-   * ones again and again
-   */
-  return !retrying;
-}
-
+#ifdef WITH_SOUP_2
+/* Note: authentication on Session level got removed from libsoup3. This is
+ * contained in the #RestCall now
+ */
 static void
 authenticate (RestProxy   *self,
               SoupMessage *msg,
@@ -230,51 +208,52 @@ authenticate (RestProxy   *self,
               gboolean     retrying,
               SoupSession *session)
 {
-  RestProxyPrivate *priv = GET_PRIVATE (self);
-  RestProxyAuth *rest_auth;
-  gboolean try_auth;
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (self);
 
-  rest_auth = rest_proxy_auth_new (self, session, msg, soup_auth);
-  g_signal_emit(self, signals[AUTHENTICATE], 0, rest_auth, retrying, &try_auth);
-  if (try_auth && !rest_proxy_auth_is_paused (rest_auth))
-    soup_auth_authenticate (soup_auth, priv->username, priv->password);
-  g_object_unref (G_OBJECT (rest_auth));
+  g_assert (REST_IS_PROXY (self));
+
+  if (retrying)
+    return;
+
+  soup_auth_authenticate (soup_auth, priv->username, priv->password);
 }
+#endif
 
 static void
 rest_proxy_constructed (GObject *object)
 {
-  RestProxyPrivate *priv = GET_PRIVATE (object);
+  RestProxy *self = REST_PROXY (object);
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (self);
 
   if (!priv->disable_cookies) {
     SoupSessionFeature *cookie_jar =
       (SoupSessionFeature *)soup_cookie_jar_new ();
     soup_session_add_feature (priv->session, cookie_jar);
-    soup_session_add_feature (priv->session_sync, cookie_jar);
     g_object_unref (cookie_jar);
   }
 
   if (REST_DEBUG_ENABLED(PROXY)) {
+#ifdef WITH_SOUP_2
     SoupSessionFeature *logger = (SoupSessionFeature*)soup_logger_new (SOUP_LOGGER_LOG_BODY, 0);
+#else
+    SoupSessionFeature *logger = (SoupSessionFeature*)soup_logger_new (SOUP_LOGGER_LOG_HEADERS);
+#endif
     soup_session_add_feature (priv->session, logger);
-    g_object_unref (logger);
-
-    logger = (SoupSessionFeature*)soup_logger_new (SOUP_LOGGER_LOG_BODY, 0);
-    soup_session_add_feature (priv->session_sync, logger);
     g_object_unref (logger);
   }
 
+#ifdef WITH_SOUP_2
   /* session lifetime is same as self, no need to keep signalid */
   g_signal_connect_swapped (priv->session, "authenticate",
                             G_CALLBACK(authenticate), object);
-  g_signal_connect_swapped (priv->session_sync, "authenticate",
-                            G_CALLBACK(authenticate), object);
+#endif
 }
 
 static void
 rest_proxy_finalize (GObject *object)
 {
-  RestProxyPrivate *priv = GET_PRIVATE (object);
+  RestProxy *self = REST_PROXY (object);
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (self);
 
   g_free (priv->url);
   g_free (priv->url_format);
@@ -294,8 +273,6 @@ rest_proxy_class_init (RestProxyClass *klass)
   RestProxyClass *proxy_class = REST_PROXY_CLASS (klass);
 
   _rest_setup_debugging ();
-
-  g_type_class_add_private (klass, sizeof (RestProxyPrivate));
 
   object_class->get_property = rest_proxy_get_property;
   object_class->set_property = rest_proxy_set_property;
@@ -378,75 +355,66 @@ rest_proxy_class_init (RestProxyClass *klass)
   g_object_class_install_property (object_class,
                                    PROP_SSL_CA_FILE,
                                    pspec);
+}
 
-  /**
-   * RestProxy::authenticate:
-   * @proxy: the proxy
-   * @auth: authentication state
-   * @retrying: %TRUE if this is the second (or later) attempt
-   *
-   * Emitted when the proxy requires authentication. If
-   * credentials are available, set the 'username' and 'password'
-   * properties on @proxy and return %TRUE from the callback.
-   * This will cause the signal emission to stop, and librest will
-   * try to connect with these credentials
-   * If these credentials fail, the signal will be
-   * emitted again, with @retrying set to %TRUE, which will
-   * continue until %FALSE is returned from the callback.
-   *
-   * If you call rest_proxy_auth_pause() on @auth before
-   * returning, then you can the authentication credentials on
-   * the #RestProxy object asynchronously. You have to make sure
-   * that @auth does not get destroyed with g_object_ref().
-   * You can then unpause the authentication with
-   * rest_proxy_auth_unpause() when everything is ready for it
-   * to continue.
-   **/
-  signals[AUTHENTICATE] =
-      g_signal_new ("authenticate",
-                    G_OBJECT_CLASS_TYPE (object_class),
-                    G_SIGNAL_RUN_LAST,
-                    G_STRUCT_OFFSET (RestProxyClass, authenticate),
-                    g_signal_accumulator_true_handled, NULL,
-                    g_cclosure_user_marshal_BOOLEAN__OBJECT_BOOLEAN,
-                    G_TYPE_BOOLEAN, 2,
-                    REST_TYPE_PROXY_AUTH,
-                    G_TYPE_BOOLEAN);
+static gboolean
+transform_ssl_ca_file_to_tls_database (GBinding     *binding,
+                                       const GValue *from_value,
+                                       GValue       *to_value,
+                                       gpointer      user_data)
+{
+  g_value_take_object (to_value,
+                       g_tls_file_database_new (g_value_get_string (from_value), NULL));
+  return TRUE;
+}
 
-  proxy_class->authenticate = default_authenticate_cb;
+static gboolean
+transform_tls_database_to_ssl_ca_file (GBinding     *binding,
+                                       const GValue *from_value,
+                                       GValue       *to_value,
+                                       gpointer      user_data)
+{
+  GTlsDatabase *tls_database;
+  char *path = NULL;
+
+  tls_database = g_value_get_object (from_value);
+  if (tls_database)
+    g_object_get (tls_database, "anchors", &path, NULL);
+  g_value_take_string (to_value, path);
+  return TRUE;
 }
 
 static void
 rest_proxy_init (RestProxy *self)
 {
-  RestProxyPrivate *priv = GET_PRIVATE (self);
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (self);
+#ifdef REST_SYSTEM_CA_FILE
+  GTlsDatabase *tls_database;
+#endif
 
-  priv->session = soup_session_async_new ();
-  priv->session_sync = soup_session_sync_new ();
+#ifndef WITH_SOUP_2
+  priv->ssl_strict = TRUE;
+#endif
+
+  priv->session = soup_session_new ();
 
 #ifdef REST_SYSTEM_CA_FILE
   /* with ssl-strict (defaults TRUE) setting ssl-ca-file forces all
    * certificates to be trusted */
-  g_object_set (priv->session,
-                "ssl-ca-file", REST_SYSTEM_CA_FILE,
-                NULL);
-  g_object_set (priv->session_sync,
-                "ssl-ca-file", REST_SYSTEM_CA_FILE,
-                NULL);
+  tls_database = g_tls_file_database_new (REST_SYSTEM_CA_FILE, NULL);
+  if (tls_database) {
+          g_object_set (priv->session,
+                        "tls-database", tls_database,
+                        NULL);
+          g_object_unref (tls_database);
+  }
 #endif
-  g_object_bind_property (self, "ssl-ca-file",
-                          priv->session, "ssl-ca-file",
-                          G_BINDING_BIDIRECTIONAL);
-  g_object_bind_property (self, "ssl-ca-file",
-                          priv->session_sync, "ssl-ca-file",
-                          G_BINDING_BIDIRECTIONAL);
-
-#if WITH_GNOME
-  soup_session_add_feature_by_type (priv->session,
-                                    SOUP_TYPE_PROXY_RESOLVER_GNOME);
-  soup_session_add_feature_by_type (priv->session_sync,
-                                    SOUP_TYPE_PROXY_RESOLVER_GNOME);
-#endif
+  g_object_bind_property_full (self, "ssl-ca-file",
+                               priv->session, "tls-database",
+                               G_BINDING_BIDIRECTIONAL,
+                               transform_ssl_ca_file_to_tls_database,
+                               transform_tls_database_to_ssl_ca_file,
+                               NULL, NULL);
 }
 
 /**
@@ -467,6 +435,8 @@ RestProxy *
 rest_proxy_new (const gchar *url_format,
                 gboolean     binding_required)
 {
+  g_return_val_if_fail (url_format != NULL, NULL);
+
   return g_object_new (REST_TYPE_PROXY,
                        "url-format", url_format,
                        "binding-required", binding_required,
@@ -495,6 +465,10 @@ rest_proxy_new_with_authentication (const gchar *url_format,
                                     const gchar *username,
                                     const gchar *password)
 {
+  g_return_val_if_fail (url_format != NULL, NULL);
+  g_return_val_if_fail (username != NULL, NULL);
+  g_return_val_if_fail (password != NULL, NULL);
+
   return g_object_new (REST_TYPE_PROXY,
                        "url-format", url_format,
                        "binding-required", binding_required,
@@ -507,7 +481,7 @@ static gboolean
 _rest_proxy_bind_valist (RestProxy *proxy,
                          va_list    params)
 {
-  RestProxyPrivate *priv = GET_PRIVATE (proxy);
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (proxy);
 
   g_return_val_if_fail (proxy != NULL, FALSE);
   g_return_val_if_fail (priv->url_format != NULL, FALSE);
@@ -533,10 +507,10 @@ rest_proxy_bind_valist (RestProxy *proxy,
 gboolean
 rest_proxy_bind (RestProxy *proxy, ...)
 {
-  g_return_val_if_fail (REST_IS_PROXY (proxy), FALSE);
-
   gboolean res;
   va_list params;
+
+  g_return_val_if_fail (REST_IS_PROXY (proxy), FALSE);
 
   va_start (params, proxy);
   res = rest_proxy_bind_valist (proxy, params);
@@ -550,6 +524,7 @@ rest_proxy_set_user_agent (RestProxy  *proxy,
                            const char *user_agent)
 {
   g_return_if_fail (REST_IS_PROXY (proxy));
+  g_return_if_fail (user_agent != NULL);
 
   g_object_set (proxy, "user-agent", user_agent, NULL);
 }
@@ -557,11 +532,9 @@ rest_proxy_set_user_agent (RestProxy  *proxy,
 const gchar *
 rest_proxy_get_user_agent (RestProxy *proxy)
 {
-  RestProxyPrivate *priv;
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (proxy);
 
   g_return_val_if_fail (REST_IS_PROXY (proxy), NULL);
-
-  priv = GET_PRIVATE (proxy);
 
   return priv->user_agent;
 }
@@ -589,17 +562,16 @@ rest_proxy_get_user_agent (RestProxy *proxy)
  * Since: 0.7.92
  */
 void
-rest_proxy_add_soup_feature (RestProxy *proxy, SoupSessionFeature *feature)
+rest_proxy_add_soup_feature (RestProxy          *proxy,
+                             SoupSessionFeature *feature)
 {
-  RestProxyPrivate *priv;
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (proxy);
 
   g_return_if_fail (REST_IS_PROXY(proxy));
-  priv = GET_PRIVATE (proxy);
+  g_return_if_fail (feature != NULL);
   g_return_if_fail (priv->session != NULL);
-  g_return_if_fail (priv->session_sync != NULL);
 
   soup_session_add_feature (priv->session, feature);
-  soup_session_add_feature (priv->session_sync, feature);
 }
 
 static RestProxyCall *
@@ -626,18 +598,20 @@ _rest_proxy_new_call (RestProxy *proxy)
 RestProxyCall *
 rest_proxy_new_call (RestProxy *proxy)
 {
-  RestProxyClass *proxy_class = REST_PROXY_GET_CLASS (proxy);
+  RestProxyClass *proxy_class;
+
+  g_return_val_if_fail (REST_IS_PROXY (proxy), NULL);
+
+  proxy_class = REST_PROXY_GET_CLASS (proxy);
   return proxy_class->new_call (proxy);
 }
 
 gboolean
 _rest_proxy_get_binding_required (RestProxy *proxy)
 {
-  RestProxyPrivate *priv;
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (proxy);
 
   g_return_val_if_fail (REST_IS_PROXY (proxy), FALSE);
-
-  priv = GET_PRIVATE (proxy);
 
   return priv->binding_required;
 }
@@ -645,16 +619,14 @@ _rest_proxy_get_binding_required (RestProxy *proxy)
 const gchar *
 _rest_proxy_get_bound_url (RestProxy *proxy)
 {
-  RestProxyPrivate *priv;
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (proxy);
 
   g_return_val_if_fail (REST_IS_PROXY (proxy), NULL);
 
-  priv = GET_PRIVATE (proxy);
-
   if (!priv->url && !priv->binding_required)
-  {
-    priv->url = g_strdup (priv->url_format);
-  }
+    {
+      priv->url = g_strdup (priv->url_format);
+    }
 
   return priv->url;
 }
@@ -676,7 +648,7 @@ _rest_proxy_simple_run_valist (RestProxy *proxy,
 
   rest_proxy_call_add_params_from_valist (call, params);
 
-  ret = rest_proxy_call_run (call, NULL, error);
+  ret = rest_proxy_call_sync (call, error);
   if (ret) {
     *payload = g_strdup (rest_proxy_call_get_payload (call));
     if (len) *len = rest_proxy_call_get_payload_length (call);
@@ -725,50 +697,160 @@ rest_proxy_simple_run (RestProxy *proxy,
   return ret;
 }
 
-void
-_rest_proxy_queue_message (RestProxy   *proxy,
-                           SoupMessage *message,
-                           SoupSessionCallback callback,
-                           gpointer user_data)
+typedef struct {
+  RestMessageFinishedCallback callback;
+  gpointer user_data;
+} RestMessageQueueData;
+
+#ifdef WITH_SOUP_2
+static void
+message_finished_cb (SoupSession *session,
+                     SoupMessage *message,
+                     gpointer     user_data)
 {
-  RestProxyPrivate *priv;
+  RestMessageQueueData *data = user_data;
+  GBytes *body;
+  GError *error = NULL;
+
+  body = g_bytes_new (message->response_body->data,
+                      message->response_body->length);
+  data->callback (message, body, error, data->user_data);
+  g_free (data);
+}
+#else
+static void
+message_send_and_read_ready_cb (GObject      *source,
+                                GAsyncResult *result,
+                                gpointer      user_data)
+{
+  SoupSession *session = SOUP_SESSION (source);
+  RestMessageQueueData *data = user_data;
+  GBytes *body;
+  GError *error = NULL;
+
+  body = soup_session_send_and_read_finish (session, result, &error);
+  data->callback (soup_session_get_async_result_message (session, result), body, error, data->user_data);
+  g_free (data);
+}
+#endif
+
+void
+_rest_proxy_queue_message (RestProxy                  *proxy,
+                           SoupMessage                *message,
+                           GCancellable               *cancellable,
+                           RestMessageFinishedCallback callback,
+                           gpointer                    user_data)
+{
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (proxy);
+  RestMessageQueueData *data;
 
   g_return_if_fail (REST_IS_PROXY (proxy));
   g_return_if_fail (SOUP_IS_MESSAGE (message));
 
-  priv = GET_PRIVATE (proxy);
+  data = g_new0 (RestMessageQueueData, 1);
+  data->callback = callback;
+  data->user_data = user_data;
 
+#ifdef WITH_SOUP_2
   soup_session_queue_message (priv->session,
                               message,
-                              callback,
-                              user_data);
+                              message_finished_cb,
+                              data);
+#else
+  soup_session_send_and_read_async (priv->session,
+                                    message,
+                                    G_PRIORITY_DEFAULT,
+                                    cancellable,
+                                    message_send_and_read_ready_cb,
+                                    data);
+#endif
+}
+
+static void
+message_send_ready_cb (GObject      *source,
+                       GAsyncResult *result,
+                       gpointer      user_data)
+{
+  SoupSession *session = SOUP_SESSION (source);
+  GTask *task = user_data;
+  GInputStream *stream;
+  GError *error = NULL;
+
+  stream = soup_session_send_finish (session, result, &error);
+  if (stream)
+    g_task_return_pointer (task, stream, g_object_unref);
+  else
+    g_task_return_error (task, error);
+  g_object_unref (task);
+}
+
+void
+_rest_proxy_send_message_async (RestProxy          *proxy,
+                                SoupMessage        *message,
+                                GCancellable       *cancellable,
+                                GAsyncReadyCallback callback,
+                                gpointer            user_data)
+{
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (proxy);
+  GTask *task;
+
+  task = g_task_new (proxy, cancellable, callback, user_data);
+  soup_session_send_async (priv->session,
+                           message,
+#ifndef WITH_SOUP_2
+                           G_PRIORITY_DEFAULT,
+#endif
+                           cancellable,
+                           message_send_ready_cb,
+                           task);
+}
+
+GInputStream *
+_rest_proxy_send_message_finish (RestProxy    *proxy,
+                                 GAsyncResult *result,
+                                 GError      **error)
+{
+  return g_task_propagate_pointer (G_TASK (result), error);
 }
 
 void
 _rest_proxy_cancel_message (RestProxy   *proxy,
                             SoupMessage *message)
 {
-  RestProxyPrivate *priv;
+#ifdef WITH_SOUP_2
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (proxy);
 
   g_return_if_fail (REST_IS_PROXY (proxy));
   g_return_if_fail (SOUP_IS_MESSAGE (message));
 
-  priv = GET_PRIVATE (proxy);
   soup_session_cancel_message (priv->session,
                                message,
                                SOUP_STATUS_CANCELLED);
+#endif
 }
 
-guint
-_rest_proxy_send_message (RestProxy   *proxy,
-                          SoupMessage *message)
+GBytes *
+_rest_proxy_send_message (RestProxy    *proxy,
+                          SoupMessage  *message,
+                          GCancellable *cancellable,
+                          GError      **error)
 {
-  RestProxyPrivate *priv;
+  RestProxyPrivate *priv = rest_proxy_get_instance_private (proxy);
+  GBytes *body;
 
-  g_return_val_if_fail (REST_IS_PROXY (proxy), 0);
-  g_return_val_if_fail (SOUP_IS_MESSAGE (message), 0);
+  g_return_val_if_fail (REST_IS_PROXY (proxy), NULL);
+  g_return_val_if_fail (SOUP_IS_MESSAGE (message), NULL);
 
-  priv = GET_PRIVATE (proxy);
+#ifdef WITH_SOUP_2
+  soup_session_send_message (priv->session, message);
+  body = g_bytes_new (message->response_body->data,
+                      message->response_body->length);
+#else
+  body = soup_session_send_and_read (priv->session,
+                                     message,
+                                     cancellable,
+                                     error);
+#endif
 
-  return soup_session_send_message (priv->session_sync, message);
+  return body;
 }

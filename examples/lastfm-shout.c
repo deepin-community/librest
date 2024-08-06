@@ -79,16 +79,12 @@ main (int argc, char **argv)
   RestProxy *proxy;
   RestProxyCall *call;
   RestXmlNode *root;
-  char *token, *url, *userid = NULL, *session = NULL;;
+  char *token, *url, *userid = NULL, *session = NULL;
   GOptionEntry entries[] = {
     { "session", 's', 0, G_OPTION_ARG_STRING, &session, "Session key (optional)", "KEY" },
     { "user", 'u', 0, G_OPTION_ARG_STRING, &userid, "User to send a message to", "USERNAME" },
     { NULL }
   };
-
-#if !GLIB_CHECK_VERSION (2, 36, 0)
-  g_type_init ();
-#endif
 
   context = g_option_context_new ("- send a shout to a Last.fm user");
   g_option_context_add_main_entries (context, entries, NULL);

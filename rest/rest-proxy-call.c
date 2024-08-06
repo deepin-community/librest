@@ -20,12 +20,14 @@
  *
  */
 
+#include <config.h>
 #include <rest/rest-proxy.h>
 #include <rest/rest-proxy-call.h>
 #include <rest/rest-params.h>
 #include <libsoup/soup.h>
 
 #include "rest-private.h"
+#include "rest-proxy-auth-private.h"
 #include "rest-proxy-call-private.h"
 
 
@@ -38,12 +40,15 @@ struct _RestProxyCallAsyncClosure {
 };
 typedef struct _RestProxyCallAsyncClosure RestProxyCallAsyncClosure;
 
+#define READ_BUFFER_SIZE 8192
+
 struct _RestProxyCallContinuousClosure {
   RestProxyCall *call;
   RestProxyCallContinuousCallback callback;
   GObject *weak_object;
   gpointer userdata;
   SoupMessage *message;
+  guchar buffer[READ_BUFFER_SIZE];
 };
 typedef struct _RestProxyCallContinuousClosure RestProxyCallContinuousClosure;
 
@@ -58,10 +63,8 @@ struct _RestProxyCallUploadClosure {
 typedef struct _RestProxyCallUploadClosure RestProxyCallUploadClosure;
 
 
-G_DEFINE_TYPE (RestProxyCall, rest_proxy_call, G_TYPE_OBJECT)
 
-#define GET_PRIVATE(o) \
-  (G_TYPE_INSTANCE_GET_PRIVATE ((o), REST_TYPE_PROXY_CALL, RestProxyCallPrivate))
+#define GET_PRIVATE(o) ((RestProxyCallPrivate*)(rest_proxy_call_get_instance_private (REST_PROXY_CALL(o))))
 
 struct _RestProxyCallPrivate {
   gchar *method;
@@ -72,8 +75,7 @@ struct _RestProxyCallPrivate {
   gchar *url;
 
   GHashTable *response_headers;
-  goffset length;
-  gchar *payload;
+  GBytes *payload;
   guint status_code;
   gchar *status_message;
 
@@ -84,6 +86,9 @@ struct _RestProxyCallPrivate {
 
   RestProxyCallAsyncClosure *cur_call_closure;
 };
+typedef struct _RestProxyCallPrivate RestProxyCallPrivate;
+
+G_DEFINE_TYPE_WITH_PRIVATE (RestProxyCall, rest_proxy_call, G_TYPE_OBJECT)
 
 
 enum
@@ -143,29 +148,10 @@ rest_proxy_call_dispose (GObject *object)
       g_clear_object (&priv->cancellable);
     }
 
-  if (priv->params)
-  {
-    rest_params_free (priv->params);
-    priv->params = NULL;
-  }
-
-  if (priv->headers)
-  {
-    g_hash_table_unref (priv->headers);
-    priv->headers = NULL;
-  }
-
-  if (priv->response_headers)
-  {
-    g_hash_table_unref (priv->response_headers);
-    priv->response_headers = NULL;
-  }
-
-  if (priv->proxy)
-  {
-    g_object_unref (priv->proxy);
-    priv->proxy = NULL;
-  }
+  g_clear_pointer (&priv->params, rest_params_unref);
+  g_clear_pointer (&priv->headers, g_hash_table_unref);
+  g_clear_pointer (&priv->response_headers, g_hash_table_unref);
+  g_clear_object (&priv->proxy);
 
   G_OBJECT_CLASS (rest_proxy_call_parent_class)->dispose (object);
 }
@@ -178,7 +164,7 @@ rest_proxy_call_finalize (GObject *object)
   g_free (priv->method);
   g_free (priv->function);
 
-  g_free (priv->payload);
+  g_clear_pointer (&priv->payload, g_bytes_unref);
   g_free (priv->status_message);
 
   g_free (priv->url);
@@ -191,8 +177,6 @@ rest_proxy_call_class_init (RestProxyCallClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   GParamSpec *pspec;
-
-  g_type_class_add_private (klass, sizeof (RestProxyCallPrivate));
 
   object_class->get_property = rest_proxy_call_get_property;
   object_class->set_property = rest_proxy_call_set_property;
@@ -211,8 +195,6 @@ static void
 rest_proxy_call_init (RestProxyCall *self)
 {
   RestProxyCallPrivate *priv = GET_PRIVATE (self);
-
-  self->priv = priv;
 
   priv->method = g_strdup ("GET");
 
@@ -239,10 +221,9 @@ void
 rest_proxy_call_set_method (RestProxyCall *call,
                             const gchar   *method)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
 
   g_return_if_fail (REST_IS_PROXY_CALL (call));
-  priv = GET_PRIVATE (call);
 
   g_free (priv->method);
 
@@ -257,16 +238,15 @@ rest_proxy_call_set_method (RestProxyCall *call,
  * @call: The #RestProxyCall
  *
  * Get the HTTP method to use when making the call, for example GET or POST.
+ *
+ * Returns: (transfer none): the HTTP method
  */
 const char *
 rest_proxy_call_get_method (RestProxyCall *call)
 {
-  RestProxyCallPrivate *priv;
-
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), NULL);
-  priv = GET_PRIVATE (call);
 
-  return priv->method;
+  return GET_PRIVATE (call)->method;
 }
 
 /**
@@ -284,13 +264,11 @@ void
 rest_proxy_call_set_function (RestProxyCall *call,
                               const gchar   *function)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
 
   g_return_if_fail (REST_IS_PROXY_CALL (call));
-  priv = GET_PRIVATE (call);
 
   g_free (priv->function);
-
   priv->function = g_strdup (function);
 }
 
@@ -308,12 +286,9 @@ rest_proxy_call_set_function (RestProxyCall *call,
 const char *
 rest_proxy_call_get_function (RestProxyCall *call)
 {
-  RestProxyCallPrivate *priv;
-
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), NULL);
-  priv = GET_PRIVATE (call);
 
-  return priv->function;
+  return GET_PRIVATE (call)->function;
 }
 
 
@@ -331,10 +306,9 @@ rest_proxy_call_add_header (RestProxyCall *call,
                             const gchar   *header,
                             const gchar   *value)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
 
   g_return_if_fail (REST_IS_PROXY_CALL (call));
-  priv = GET_PRIVATE (call);
 
   g_hash_table_insert (priv->headers,
                        g_strdup (header),
@@ -401,12 +375,9 @@ const gchar *
 rest_proxy_call_lookup_header (RestProxyCall *call,
                                const gchar   *header)
 {
-  RestProxyCallPrivate *priv;
-
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), NULL);
-  priv = GET_PRIVATE (call);
 
-  return g_hash_table_lookup (priv->headers, header);
+  return g_hash_table_lookup (GET_PRIVATE (call)->headers, header);
 }
 
 /**
@@ -420,12 +391,9 @@ void
 rest_proxy_call_remove_header (RestProxyCall *call,
                                const gchar   *header)
 {
-  RestProxyCallPrivate *priv;
-
   g_return_if_fail (REST_IS_PROXY_CALL (call));
-  priv = GET_PRIVATE (call);
 
-  g_hash_table_remove (priv->headers, header);
+  g_hash_table_remove (GET_PRIVATE (call)->headers, header);
 }
 
 /**
@@ -443,27 +411,31 @@ rest_proxy_call_add_param (RestProxyCall *call,
                            const gchar   *name,
                            const gchar   *value)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
   RestParam *param;
 
   g_return_if_fail (REST_IS_PROXY_CALL (call));
-  priv = GET_PRIVATE (call);
 
   param = rest_param_new_string (name, REST_MEMORY_COPY, value);
   rest_params_add (priv->params, param);
 }
 
+/**
+ * rest_proxy_call_add_param_full:
+ * @call: The #RestProxyCall
+ * @param: (transfer full): A #RestParam
+ *
+ * Add a query parameter @param to the call.
+ * If a parameter with this name already exists, the new value will replace the
+ * old.
+ */
 void
 rest_proxy_call_add_param_full (RestProxyCall *call, RestParam *param)
 {
-  RestProxyCallPrivate *priv;
-
   g_return_if_fail (REST_IS_PROXY_CALL (call));
   g_return_if_fail (param);
 
-  priv = GET_PRIVATE (call);
-
-  rest_params_add (priv->params, param);
+  rest_params_add (GET_PRIVATE (call)->params, param);
 }
 
 /**
@@ -518,20 +490,17 @@ rest_proxy_call_add_params_from_valist (RestProxyCall *call,
  *
  * Get the value of the parameter called @name.
  *
- * Returns: The parameter value, or %NULL if it does not exist. This string is
- * owned by the #RestProxyCall and should not be freed.
+ * Returns: (transfer none) (nullable): The parameter value, or %NULL if it does
+ * not exist. This string is owned by the #RestProxyCall and should not be
+ * freed.
  */
 RestParam *
 rest_proxy_call_lookup_param (RestProxyCall *call,
                               const gchar   *name)
 {
-  RestProxyCallPrivate *priv;
-
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), NULL);
 
-  priv = GET_PRIVATE (call);
-
-  return rest_params_get (priv->params, name);
+  return rest_params_get (GET_PRIVATE (call)->params, name);
 }
 
 /**
@@ -545,13 +514,9 @@ void
 rest_proxy_call_remove_param (RestProxyCall *call,
                               const gchar   *name)
 {
-  RestProxyCallPrivate *priv;
-
   g_return_if_fail (REST_IS_PROXY_CALL (call));
 
-  priv = GET_PRIVATE (call);
-
-  rest_params_remove (priv->params, name);
+  rest_params_remove (GET_PRIVATE (call)->params, name);
 }
 
 /**
@@ -567,23 +532,15 @@ rest_proxy_call_remove_param (RestProxyCall *call,
 RestParams *
 rest_proxy_call_get_params (RestProxyCall *call)
 {
-  RestProxyCallPrivate *priv;
-
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), NULL);
 
-  priv = GET_PRIVATE (call);
-
-  return priv->params;
+  return GET_PRIVATE (call)->params;
 }
 
 
 
 static void _call_async_weak_notify_cb (gpointer *data,
                                         GObject  *dead_object);
-
-static void _call_message_completed_cb (SoupSession *session,
-                                        SoupMessage *message,
-                                        gpointer     userdata);
 
 static void
 _populate_headers_hash_table (const gchar *name,
@@ -595,14 +552,23 @@ _populate_headers_hash_table (const gchar *name,
   g_hash_table_insert (headers, g_strdup (name), g_strdup (value));
 }
 
+#ifdef WITH_SOUP_2
 /* I apologise for this macro, but it saves typing ;-) */
 #define error_helper(x) g_set_error_literal(error, REST_PROXY_ERROR, x, message->reason_phrase)
+#endif
 static gboolean
 _handle_error_from_message (SoupMessage *message, GError **error)
 {
-  if (message->status_code < 100)
+  guint status_code;
+  const char *reason_phrase;
+
+#ifdef WITH_SOUP_2
+  status_code = message->status_code;
+
+  if (status_code < 100)
   {
-    switch (message->status_code)
+    g_clear_error (error);
+    switch (status_code)
     {
       case SOUP_STATUS_CANCELLED:
         error_helper (REST_PROXY_ERROR_CANCELLED);
@@ -629,99 +595,84 @@ _handle_error_from_message (SoupMessage *message, GError **error)
     }
     return FALSE;
   }
+  reason_phrase = message->reason_phrase;
+#else
+  status_code = soup_message_get_status (message);
+  reason_phrase = soup_message_get_reason_phrase (message);
+#endif
 
-  if (message->status_code >= 200 && message->status_code < 300)
+  if (status_code >= 200 && status_code < 300)
   {
     return TRUE;
   }
 
+  if (*error != NULL)
+    return FALSE;
+
   /* If we are here we must be in some kind of HTTP error, lets try */
   g_set_error_literal (error,
                        REST_PROXY_ERROR,
-                       message->status_code,
-                       message->reason_phrase);
+                       status_code,
+                       reason_phrase);
   return FALSE;
 }
 
 static gboolean
-finish_call (RestProxyCall *call, SoupMessage *message, GError **error)
+finish_call (RestProxyCall *call, SoupMessage *message, GBytes *payload, GError **error)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
+  SoupMessageHeaders *response_headers;
 
   g_assert (call);
   g_assert (message);
-  priv = GET_PRIVATE (call);
+  g_assert (payload);
+
+#ifdef WITH_SOUP_2
+  response_headers = message->response_headers;
+#else
+  response_headers = soup_message_get_response_headers (message);
+#endif
 
   /* Convert the soup headers in to hash */
   /* FIXME: Eeek..are you allowed duplicate headers? ... */
   g_hash_table_remove_all (priv->response_headers);
-  soup_message_headers_foreach (message->response_headers,
+  soup_message_headers_foreach (response_headers,
       (SoupMessageHeadersForeachFunc)_populate_headers_hash_table,
       priv->response_headers);
 
-  priv->payload = g_memdup (message->response_body->data,
-                            message->response_body->length + 1);
-  priv->length = message->response_body->length;
+  priv->payload = payload;
 
+#ifdef WITH_SOUP_2
   priv->status_code = message->status_code;
   priv->status_message = g_strdup (message->reason_phrase);
+#else
+  priv->status_code = soup_message_get_status (message);
+  priv->status_message = g_strdup (soup_message_get_reason_phrase (message));
+#endif
 
   return _handle_error_from_message (message, error);
 }
 
 static void
-_call_message_completed_cb (SoupSession *session,
-                               SoupMessage *message,
-                               gpointer     userdata)
-{
-  RestProxyCallAsyncClosure *closure;
-  RestProxyCall *call;
-  RestProxyCallPrivate *priv;
-  GError *error = NULL;
-
-  closure = (RestProxyCallAsyncClosure *)userdata;
-  call = closure->call;
-  priv = GET_PRIVATE (call);
-
-  finish_call (call, message, &error);
-
-  closure->callback (closure->call,
-                     error,
-                     closure->weak_object,
-                     closure->userdata);
-
-  g_clear_error (&error);
-
-  /* Success. We don't need the weak reference any more */
-  if (closure->weak_object)
-  {
-    g_object_weak_unref (closure->weak_object,
-        (GWeakNotify)_call_async_weak_notify_cb,
-        closure);
-  }
-
-  priv->cur_call_closure = NULL;
-  g_object_unref (closure->call);
-  g_slice_free (RestProxyCallAsyncClosure, closure);
-}
-
-
-static void
-_continuous_call_message_completed_cb (SoupSession *session,
-                                       SoupMessage *message,
-                                       gpointer     userdata)
+_continuous_call_message_completed (SoupMessage *message,
+                                    GError      *error,
+                                    gpointer     userdata)
 {
   RestProxyCallContinuousClosure *closure;
   RestProxyCall *call;
   RestProxyCallPrivate *priv;
-  GError *error = NULL;
 
   closure = (RestProxyCallContinuousClosure *)userdata;
   call = closure->call;
   priv = GET_PRIVATE (call);
 
+#ifdef WITH_SOUP_2
   priv->status_code = message->status_code;
   priv->status_message = g_strdup (message->reason_phrase);
+#else
+  priv->status_code = soup_message_get_status (message);
+  priv->status_message = g_strdup (soup_message_get_reason_phrase (message));
+#endif
 
   _handle_error_from_message (message, &error);
 
@@ -744,6 +695,7 @@ _continuous_call_message_completed_cb (SoupSession *session,
 
   priv->cur_call_closure = NULL;
   g_object_unref (closure->call);
+  g_object_unref (message);
   g_slice_free (RestProxyCallContinuousClosure, closure);
 }
 
@@ -772,10 +724,8 @@ set_header (gpointer key, gpointer value, gpointer user_data)
 static gboolean
 set_url (RestProxyCall *call)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
   const gchar *bound_url;
-
-  priv = GET_PRIVATE (call);
 
   bound_url =_rest_proxy_get_bound_url (priv->proxy);
 
@@ -804,16 +754,53 @@ set_url (RestProxyCall *call)
   return TRUE;
 }
 
+#ifndef WITH_SOUP_2
+static gboolean
+authenticate (RestProxyCall *call,
+              SoupAuth      *soup_auth,
+              gboolean       retrying,
+              SoupMessage   *message)
+{
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
+  g_autofree char *username;
+  g_autofree char *password;
+
+  if (retrying)
+    return FALSE;
+
+  g_object_get (priv->proxy, "username", &username, "password", &password, NULL);
+  soup_auth_authenticate (soup_auth, username, password);
+
+  return TRUE;
+}
+
+static gboolean
+accept_certificate (RestProxyCall        *call,
+                    GTlsCertificate      *tls_certificate,
+                    GTlsCertificateFlags *tls_errors,
+                    SoupMessage          *message)
+{
+        RestProxyCallPrivate *priv = GET_PRIVATE (call);
+        gboolean ssl_strict;
+
+        if (tls_errors == 0)
+                return TRUE;
+
+        g_object_get (priv->proxy, "ssl-strict", &ssl_strict, NULL);
+        return !ssl_strict;
+}
+#endif
+
 static SoupMessage *
 prepare_message (RestProxyCall *call, GError **error_out)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
   RestProxyCallClass *call_class;
   const gchar *user_agent;
   SoupMessage *message;
+  SoupMessageHeaders *request_headers;
   GError *error = NULL;
 
-  priv = GET_PRIVATE (call);
   call_class = REST_PROXY_CALL_GET_CLASS (call);
 
   /* Emit a warning if the caller is re-using RestProxyCall objects */
@@ -838,6 +825,9 @@ prepare_message (RestProxyCall *call, GError **error_out)
     gchar *content;
     gchar *content_type;
     gsize content_len;
+#ifndef WITH_SOUP_2
+    GBytes *body;
+#endif
 
     if (!call_class->serialize_params (call, &content_type,
                                        &content, &content_len, &error))
@@ -853,6 +843,10 @@ prepare_message (RestProxyCall *call, GError **error_out)
     {
         g_free (content);
         g_free (content_type);
+        g_set_error_literal (error_out,
+                             REST_PROXY_ERROR,
+                             REST_PROXY_ERROR_BINDING_REQUIRED,
+                             "URL is unbound");
         return NULL;
     }
 
@@ -866,8 +860,14 @@ prepare_message (RestProxyCall *call, GError **error_out)
                              "Could not parse URI");
         return NULL;
     }
+#ifdef WITH_SOUP_2
     soup_message_set_request (message, content_type,
                               SOUP_MEMORY_TAKE, content, content_len);
+#else
+    body = g_bytes_new_take (content, content_len);
+    soup_message_set_request_body_from_bytes (message, content_type, body);
+    g_bytes_unref (body);
+#endif
 
     g_free (content_type);
   } else if (rest_params_are_strings (priv->params)) {
@@ -875,16 +875,42 @@ prepare_message (RestProxyCall *call, GError **error_out)
 
     if (!set_url (call))
     {
+        g_set_error_literal (error_out,
+                             REST_PROXY_ERROR,
+                             REST_PROXY_ERROR_BINDING_REQUIRED,
+                             "URL is unbound");
         return NULL;
     }
 
     hash = rest_params_as_string_hash_table (priv->params);
 
-    message = soup_form_request_new_from_hash (priv->method,
-                                               priv->url,
-                                               hash);
+#ifdef WITH_SOUP_2
+    if (g_hash_table_size (hash) == 0)
+      message = soup_message_new (priv->method, priv->url);
+    else
+      message = soup_form_request_new_from_hash (priv->method,
+                                                 priv->url,
+                                                 hash);
+#else
+    if (g_hash_table_size (hash) == 0)
+      message = soup_message_new (priv->method, priv->url);
+    else
+      message = soup_message_new_from_encoded_form (priv->method,
+                                                    priv->url,
+                                                    soup_form_encode_hash (hash));
+#endif
 
     g_hash_table_unref (hash);
+
+    if (!message) {
+        g_set_error (error_out,
+                     REST_PROXY_ERROR,
+                     REST_PROXY_ERROR_URL_INVALID,
+                     "URL '%s' is not valid",
+                     priv->url);
+        return NULL;
+    }
+
   } else {
     SoupMultipart *mp;
     RestParamsIter iter;
@@ -899,109 +925,73 @@ prepare_message (RestProxyCall *call, GError **error_out)
       if (rest_param_is_string (param)) {
         soup_multipart_append_form_string (mp, name, rest_param_get_content (param));
       } else {
-        SoupBuffer *sb;
-
-        sb = soup_buffer_new_with_owner (rest_param_get_content (param),
-                                         rest_param_get_content_length (param),
-                                         rest_param_ref (param),
-                                         (GDestroyNotify)rest_param_unref);
+#ifdef WITH_SOUP_2
+        SoupBuffer *sb = soup_buffer_new_with_owner (rest_param_get_content (param),
+                                                     rest_param_get_content_length (param),
+                                                     rest_param_ref (param),
+                                                     (GDestroyNotify)rest_param_unref);
+#else
+        GBytes *sb = g_bytes_new_with_free_func (rest_param_get_content (param),
+                                                 rest_param_get_content_length (param),
+                                                 (GDestroyNotify)rest_param_unref,
+                                                 rest_param_ref (param));
+#endif
 
         soup_multipart_append_form_file (mp, name,
                                          rest_param_get_file_name (param),
                                          rest_param_get_content_type (param),
                                          sb);
 
+#ifdef WITH_SOUP_2
         soup_buffer_free (sb);
+#else
+        g_bytes_unref (sb);
+#endif
       }
     }
 
     if (!set_url (call))
     {
         soup_multipart_free (mp);
+        g_set_error_literal (error_out,
+                             REST_PROXY_ERROR,
+                             REST_PROXY_ERROR_BINDING_REQUIRED,
+                             "URL is unbound");
         return NULL;
     }
 
+#ifdef WITH_SOUP_2
     message = soup_form_request_new_from_multipart (priv->url, mp);
+#else
+    message = soup_message_new_from_multipart (priv->url, mp);
+#endif
 
     soup_multipart_free (mp);
   }
 
+#ifdef WITH_SOUP_2
+  request_headers = message->request_headers;
+#else
+  request_headers = soup_message_get_request_headers (message);
+  g_signal_connect_swapped (message, "authenticate",
+                            G_CALLBACK (authenticate),
+                            call);
+  g_signal_connect_swapped (message, "accept-certificate",
+                            G_CALLBACK (accept_certificate),
+                            call);
+#endif
+
+
   /* Set the user agent, if one was set in the proxy */
   user_agent = rest_proxy_get_user_agent (priv->proxy);
   if (user_agent) {
-    soup_message_headers_append (message->request_headers, "User-Agent", user_agent);
+    soup_message_headers_append (request_headers, "User-Agent", user_agent);
   }
 
   /* Set the headers */
-  g_hash_table_foreach (priv->headers, set_header, message->request_headers);
+  g_hash_table_foreach (priv->headers, set_header, request_headers);
 
   return message;
-}
-
-/**
- * rest_proxy_call_async: (skip)
- * @call: The #RestProxyCall
- * @callback: a #RestProxyCallAsyncCallback to invoke on completion of the call
- * @weak_object: The #GObject to weakly reference and tie the lifecycle too
- * @userdata: data to pass to @callback
- * @error: a #GError, or %NULL
- *
- * Asynchronously invoke @call.
- *
- * When the call has finished, @callback will be called.  If @weak_object is
- * disposed during the call then this call will be cancelled. If the call is
- * cancelled then the callback will be invoked with an error state.
- *
- * You may unref the call after calling this function since there is an
- * internal reference, or you may unref in the callback.
- */
-gboolean
-rest_proxy_call_async (RestProxyCall                *call,
-                       RestProxyCallAsyncCallback    callback,
-                       GObject                      *weak_object,
-                       gpointer                      userdata,
-                       GError                      **error)
-{
-  RestProxyCallPrivate *priv;
-  SoupMessage *message;
-  RestProxyCallAsyncClosure *closure;
-
-  g_return_val_if_fail (REST_IS_PROXY_CALL (call), FALSE);
-  priv = GET_PRIVATE (call);
-  g_assert (priv->proxy);
-
-  if (priv->cur_call_closure)
-  {
-    g_warning (G_STRLOC ": re-use of RestProxyCall %p, don't do this", call);
-    return FALSE;
-  }
-
-  message = prepare_message (call, error);
-  if (message == NULL)
-    return FALSE;
-
-  closure = g_slice_new0 (RestProxyCallAsyncClosure);
-  closure->call = g_object_ref (call);
-  closure->callback = callback;
-  closure->weak_object = weak_object;
-  closure->message = message;
-  closure->userdata = userdata;
-
-  priv->cur_call_closure = closure;
-
-  /* Weakly reference this object. We remove our callback if it goes away. */
-  if (closure->weak_object)
-  {
-    g_object_weak_ref (closure->weak_object,
-        (GWeakNotify)_call_async_weak_notify_cb,
-        closure);
-  }
-
-  _rest_proxy_queue_message (priv->proxy,
-                             message,
-                             _call_message_completed_cb,
-                             closure);
-  return TRUE;
 }
 
 static void
@@ -1012,39 +1002,37 @@ _call_message_call_cancelled_cb (GCancellable  *cancellable,
 }
 
 static void
-_call_message_call_completed_cb (SoupSession *session,
-                                 SoupMessage *message,
+_call_message_call_completed_cb (SoupMessage *message,
+                                 GBytes      *payload,
+                                 GError      *error,
                                  gpointer     user_data)
 {
-  GSimpleAsyncResult *result = user_data;
+  g_autoptr(GTask) task = user_data;
   RestProxyCall *call;
-  GError *error = NULL;
 
-  call = REST_PROXY_CALL (
-      g_async_result_get_source_object (G_ASYNC_RESULT (result)));
+  call = REST_PROXY_CALL (g_task_get_source_object (task));
 
-  finish_call (call, message, &error);
+  if (error)
+    {
+      g_task_return_error (task, error);
+      return;
+    }
+
+  finish_call (call, message, payload, &error);
 
   if (error != NULL)
-    g_simple_async_result_take_error (result, error);
+    g_task_return_error (task, error);
   else
-    g_simple_async_result_set_op_res_gboolean (result, TRUE);
-
-  g_simple_async_result_complete (result);
-
-  g_object_unref (call);
-  g_object_unref (result);
+    g_task_return_boolean (task, TRUE);
 }
 
 /**
  * rest_proxy_call_invoke_async:
  * @call: a #RestProxyCall
- * @cancellable: (allow-none): an optional #GCancellable that can be used to
+ * @cancellable: (nullable): an optional #GCancellable that can be used to
  *   cancel the call, or %NULL
  * @callback: (scope async): callback to call when the async call is finished
  * @user_data: (closure): user data for the callback
- *
- * A GIO-style version of rest_proxy_call_async().
  */
 void
 rest_proxy_call_invoke_async (RestProxyCall      *call,
@@ -1052,25 +1040,22 @@ rest_proxy_call_invoke_async (RestProxyCall      *call,
                               GAsyncReadyCallback callback,
                               gpointer            user_data)
 {
-  GSimpleAsyncResult *result;
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
+  GTask *task;
   SoupMessage *message;
   GError *error = NULL;
 
   g_return_if_fail (REST_IS_PROXY_CALL (call));
-  priv = GET_PRIVATE (call);
+  g_return_if_fail (cancellable == NULL || G_IS_CANCELLABLE (cancellable));
   g_assert (priv->proxy);
 
   message = prepare_message (call, &error);
+  task = g_task_new (call, cancellable, callback, user_data);
   if (message == NULL)
     {
-      g_simple_async_report_take_gerror_in_idle (G_OBJECT (call), callback,
-                                                 user_data, error);
+      g_task_return_error (task, error);
       return;
     }
-
-  result = g_simple_async_result_new (G_OBJECT (call), callback,
-                                      user_data, rest_proxy_call_invoke_async);
 
   if (cancellable != NULL)
     {
@@ -1081,8 +1066,9 @@ rest_proxy_call_invoke_async (RestProxyCall      *call,
 
   _rest_proxy_queue_message (priv->proxy,
                              message,
+                             priv->cancellable,
                              _call_message_call_completed_cb,
-                             result);
+                             task);
 }
 
 /**
@@ -1094,37 +1080,66 @@ rest_proxy_call_invoke_async (RestProxyCall      *call,
  * Returns: %TRUE on success
  */
 gboolean
-rest_proxy_call_invoke_finish (RestProxyCall *call,
-                             GAsyncResult  *result,
-                             GError       **error)
+rest_proxy_call_invoke_finish (RestProxyCall  *call,
+                               GAsyncResult   *result,
+                               GError        **error)
 {
-  GSimpleAsyncResult *simple;
-
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), FALSE);
-  g_return_val_if_fail (G_IS_SIMPLE_ASYNC_RESULT (result), FALSE);
+  g_return_val_if_fail (g_task_is_valid (result, call), FALSE);
 
-  simple = G_SIMPLE_ASYNC_RESULT (result);
-
-  g_return_val_if_fail (g_simple_async_result_is_valid (result,
-        G_OBJECT (call), rest_proxy_call_invoke_async), FALSE);
-
-  if (g_simple_async_result_propagate_error (simple, error))
-    return FALSE;
-
-  return g_simple_async_result_get_op_res_gboolean (simple);
+  return g_task_propagate_boolean (G_TASK (result), error);
 }
 
 static void
-_continuous_call_message_got_chunk_cb (SoupMessage                    *msg,
-                                       SoupBuffer                     *chunk,
-                                       RestProxyCallContinuousClosure *closure)
+_continuous_call_read_cb (GObject      *source,
+                          GAsyncResult *result,
+                          gpointer      user_data)
 {
+  GInputStream *stream = G_INPUT_STREAM (source);
+  RestProxyCallContinuousClosure *closure = user_data;
+  RestProxyCallPrivate *priv = GET_PRIVATE (closure->call);
+  gssize bytes_read;
+  GError *error = NULL;
+
+  bytes_read = g_input_stream_read_finish (stream, result, &error);
+  if (bytes_read <= 0)
+    {
+      _continuous_call_message_completed (closure->message, error, user_data);
+      return;
+    }
+
   closure->callback (closure->call,
-                     chunk->data,
-                     chunk->length,
+                     (gconstpointer)closure->buffer,
+                     bytes_read,
                      NULL,
                      closure->weak_object,
                      closure->userdata);
+
+  g_input_stream_read_async (stream, closure->buffer, READ_BUFFER_SIZE, G_PRIORITY_DEFAULT,
+                             priv->cancellable, _continuous_call_read_cb, closure);
+}
+
+static void
+_continuous_call_message_sent_cb (GObject      *source,
+                                  GAsyncResult *result,
+                                  gpointer      user_data)
+{
+  RestProxy *proxy = REST_PROXY (source);
+  RestProxyCallContinuousClosure *closure = user_data;
+  RestProxyCallPrivate *priv = GET_PRIVATE (closure->call);
+  GInputStream *stream;
+  GError *error = NULL;
+
+  stream = _rest_proxy_send_message_finish (proxy, result, &error);
+  if (!stream)
+    {
+      _continuous_call_message_completed (closure->message, error, user_data);
+      return;
+    }
+
+  g_input_stream_read_async (stream, closure->buffer, READ_BUFFER_SIZE, G_PRIORITY_DEFAULT,
+                             priv->cancellable, _continuous_call_read_cb, closure);
+  g_object_unref (stream);
 }
 
 
@@ -1141,7 +1156,7 @@ _continuous_call_message_got_chunk_cb (SoupMessage                    *msg,
  * rest_proxy_call_get_payload()
  *
  * When there is data @callback will be called and when the connection is
- * closed or the stream ends @callback will also be called. 
+ * closed or the stream ends @callback will also be called.
  *
  * If @weak_object is disposed during the call then this call will be
  * cancelled. If the call is cancelled then the callback will be invoked with
@@ -1149,6 +1164,8 @@ _continuous_call_message_got_chunk_cb (SoupMessage                    *msg,
  *
  * You may unref the call after calling this function since there is an
  * internal reference, or you may unref in the callback.
+ *
+ * Returns: %TRUE on success
  */
 gboolean
 rest_proxy_call_continuous (RestProxyCall                    *call,
@@ -1157,12 +1174,11 @@ rest_proxy_call_continuous (RestProxyCall                    *call,
                             gpointer                          userdata,
                             GError                          **error)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
   SoupMessage *message;
   RestProxyCallContinuousClosure *closure;
 
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), FALSE);
-  priv = GET_PRIVATE (call);
   g_assert (priv->proxy);
 
   if (priv->cur_call_closure)
@@ -1174,9 +1190,6 @@ rest_proxy_call_continuous (RestProxyCall                    *call,
   message = prepare_message (call, error);
   if (message == NULL)
     return FALSE;
-
-  /* Must turn off accumulation */
-  soup_message_body_set_accumulate (message->response_body, FALSE);
 
   closure = g_slice_new0 (RestProxyCallContinuousClosure);
   closure->call = g_object_ref (call);
@@ -1195,33 +1208,29 @@ rest_proxy_call_continuous (RestProxyCall                    *call,
         closure);
   }
 
-  g_signal_connect (message,
-                    "got-chunk",
-                    (GCallback)_continuous_call_message_got_chunk_cb,
-                    closure);
-
-  _rest_proxy_queue_message (priv->proxy,
-                             message,
-                             _continuous_call_message_completed_cb,
-                             closure);
+  _rest_proxy_send_message_async (priv->proxy,
+                                  message,
+                                  priv->cancellable,
+                                  _continuous_call_message_sent_cb,
+                                  closure);
   return TRUE;
 }
 
 static void
-_upload_call_message_completed_cb (SoupSession *session,
-                                   SoupMessage *message,
+_upload_call_message_completed_cb (SoupMessage *message,
+                                   GBytes      *payload,
+                                   GError      *error,
                                    gpointer     user_data)
 {
   RestProxyCall *call;
   RestProxyCallPrivate *priv;
-  GError *error = NULL;
   RestProxyCallUploadClosure *closure;
 
   closure = (RestProxyCallUploadClosure *) user_data;
   call = closure->call;
   priv = GET_PRIVATE (call);
 
-  finish_call (call, message, &error);
+  finish_call (call, message, payload, &error);
 
   closure->callback (closure->call,
                      closure->uploaded,
@@ -1247,14 +1256,25 @@ _upload_call_message_completed_cb (SoupSession *session,
 
 static void
 _upload_call_message_wrote_data_cb (SoupMessage                *msg,
+#ifdef WITH_SOUP_2
                                     SoupBuffer                 *chunk,
+#else
+                                    gsize                       chunk_size,
+#endif
                                     RestProxyCallUploadClosure *closure)
 {
-  closure->uploaded = closure->uploaded + chunk->length;
+#ifdef WITH_SOUP_2
+  gsize chunk_size = chunk->length;
+  goffset content_length = msg->request_body->length;
+#else
+  goffset content_length = soup_message_headers_get_content_length (soup_message_get_request_headers (msg));
+#endif
 
-  if (closure->uploaded < msg->request_body->length)
+  closure->uploaded = closure->uploaded + chunk_size;
+
+  if (closure->uploaded < content_length)
     closure->callback (closure->call,
-                       msg->request_body->length,
+                       content_length,
                        closure->uploaded,
                        NULL,
                        closure->weak_object,
@@ -1290,12 +1310,11 @@ rest_proxy_call_upload (RestProxyCall                *call,
                         gpointer                      userdata,
                         GError                      **error)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
   SoupMessage *message;
   RestProxyCallUploadClosure *closure;
 
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), FALSE);
-  priv = GET_PRIVATE (call);
   g_assert (priv->proxy);
 
   if (priv->cur_call_closure)
@@ -1333,6 +1352,7 @@ rest_proxy_call_upload (RestProxyCall                *call,
 
   _rest_proxy_queue_message (priv->proxy,
                              message,
+                             priv->cancellable,
                              _upload_call_message_completed_cb,
                              closure);
   return TRUE;
@@ -1351,17 +1371,20 @@ rest_proxy_call_upload (RestProxyCall                *call,
 gboolean
 rest_proxy_call_cancel (RestProxyCall *call)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
   RestProxyCallAsyncClosure *closure;
 
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), FALSE);
 
-  priv = GET_PRIVATE (call);
   closure = priv->cur_call_closure;
 
   if (priv->cancellable)
     {
       g_signal_handler_disconnect (priv->cancellable, priv->cancel_sig);
+#ifndef WITH_SOUP_2
+      if (!g_cancellable_is_cancelled (priv->cancellable))
+              g_cancellable_cancel (priv->cancellable);
+#endif
       g_clear_object (&priv->cancellable);
     }
 
@@ -1375,93 +1398,38 @@ rest_proxy_call_cancel (RestProxyCall *call)
   return TRUE;
 }
 
-typedef struct
-{
-  GMainLoop *loop;
-  GError *error;
-} RestProxyCallRunClosure;
-
-static void
-_rest_proxy_call_async_cb (RestProxyCall *call,
-                           const GError  *error,
-                           GObject       *weak_object,
-                           gpointer       userdata)
-{
-  RestProxyCallRunClosure *closure = (RestProxyCallRunClosure *)userdata;
-
-  /* *duplicate* not propagate the error */
-  if (error)
-    closure->error = g_error_copy (error);
-
-  g_main_loop_quit (closure->loop);
-}
-
-gboolean
-rest_proxy_call_run (RestProxyCall *call,
-                     GMainLoop    **loop_out,
-                     GError       **error_out)
-{
-  gboolean res = TRUE;
-  GError *error = NULL;
-  RestProxyCallRunClosure closure = { NULL, NULL};
-
-  g_return_val_if_fail (REST_IS_PROXY_CALL (call), FALSE);
-
-  closure.loop = g_main_loop_new (NULL, FALSE);
-
-  if (loop_out)
-    *loop_out = closure.loop;
-
-  res = rest_proxy_call_async (call,
-      _rest_proxy_call_async_cb,
-      NULL,
-      &closure,
-      &error);
-
-  if (!res)
-  {
-    g_propagate_error (error_out, error);
-    goto error;
-  }
-
-  g_main_loop_run (closure.loop);
-
-  if (closure.error)
-  {
-    /* If the caller has asked for the error then propagate else free it */
-    if (error_out)
-    {
-      g_propagate_error (error_out, closure.error);
-    } else {
-      g_clear_error (&(closure.error));
-    }
-    res = FALSE;
-  }
-
-error:
-  g_main_loop_unref (closure.loop);
-  return res;
-}
-
+/**
+ * rest_proxy_call_sync:
+ * @call: a #RestProxycall
+ * @error_out: a #GError or %NULL
+ *
+ * Synchronously invokes @call. After this function has returned,
+ * rest_proxy_call_get_payload() will return the result of this call.
+ *
+ * Note that this will block an undefined amount of time, so
+ * rest_proxy_call_invoke_async() is generally recommended.
+ *
+ * Returns: %TRUE on success, %FALSE if a failure occurred,
+ *   in which case @error_out will be set.
+ */
 gboolean
 rest_proxy_call_sync (RestProxyCall *call,
                       GError       **error_out)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
   SoupMessage *message;
   gboolean ret;
+  GBytes *payload;
 
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), FALSE);
-
-  priv = GET_PRIVATE (call);
 
   message = prepare_message (call, error_out);
   if (!message)
     return FALSE;
 
-  _rest_proxy_send_message (priv->proxy, message);
+  payload = _rest_proxy_send_message (priv->proxy, message, priv->cancellable, error_out);
 
-  ret = finish_call (call, message, error_out);
+  ret = finish_call (call, message, payload, error_out);
 
   g_object_unref (message);
 
@@ -1480,11 +1448,9 @@ const gchar *
 rest_proxy_call_lookup_response_header (RestProxyCall *call,
                                         const gchar   *header)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
 
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), NULL);
-
-  priv = GET_PRIVATE (call);
 
   if (!priv->response_headers)
   {
@@ -1498,18 +1464,16 @@ rest_proxy_call_lookup_response_header (RestProxyCall *call,
  * rest_proxy_call_get_response_headers:
  * @call: The #RestProxyCall
  *
- * Returns: (transfer container): pointer to a hash table of
- * headers. This hash table must not be changed. You should call
+ * Returns: (transfer container) (element-type utf8 utf8): pointer to a hash
+ * table of headers. This hash table must not be changed. You should call
  * g_hash_table_unref() when you have finished with it.
  */
 GHashTable *
 rest_proxy_call_get_response_headers (RestProxyCall *call)
 {
-  RestProxyCallPrivate *priv;
+  RestProxyCallPrivate *priv = GET_PRIVATE (call);
 
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), NULL);
-
-  priv = GET_PRIVATE (call);
 
   if (!priv->response_headers)
   {
@@ -1530,13 +1494,12 @@ rest_proxy_call_get_response_headers (RestProxyCall *call)
 goffset
 rest_proxy_call_get_payload_length (RestProxyCall *call)
 {
-  RestProxyCallPrivate *priv;
+  GBytes *payload;
 
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), 0);
 
-  priv = GET_PRIVATE (call);
-
-  return priv->length;
+  payload = GET_PRIVATE (call)->payload;
+  return payload ? g_bytes_get_size (payload) : 0;
 }
 
 /**
@@ -1551,13 +1514,12 @@ rest_proxy_call_get_payload_length (RestProxyCall *call)
 const gchar *
 rest_proxy_call_get_payload (RestProxyCall *call)
 {
-  RestProxyCallPrivate *priv;
+  GBytes *payload;
 
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), NULL);
 
-  priv = GET_PRIVATE (call);
-
-  return priv->payload;
+  payload = GET_PRIVATE (call)->payload;
+  return payload ? g_bytes_get_data (payload, NULL) : NULL;
 }
 
 /**
@@ -1569,13 +1531,9 @@ rest_proxy_call_get_payload (RestProxyCall *call)
 guint
 rest_proxy_call_get_status_code (RestProxyCall *call)
 {
-  RestProxyCallPrivate *priv;
-
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), 0);
 
-  priv = GET_PRIVATE (call);
-
-  return priv->status_code;
+  return GET_PRIVATE (call)->status_code;
 }
 
 /**
@@ -1590,13 +1548,9 @@ rest_proxy_call_get_status_code (RestProxyCall *call)
 const gchar *
 rest_proxy_call_get_status_message (RestProxyCall *call)
 {
-  RestProxyCallPrivate *priv;
-
   g_return_val_if_fail (REST_IS_PROXY_CALL (call), NULL);
 
-  priv = GET_PRIVATE (call);
-
-  return priv->status_message;
+  return GET_PRIVATE (call)->status_message;
 }
 
 /**
@@ -1640,5 +1594,5 @@ rest_proxy_call_get_url (RestProxyCall *call)
    * but this has been changed/broken by c66b6df
    */
   set_url(call);
-  return call->priv->url;
+  return GET_PRIVATE (call)->url;
 }

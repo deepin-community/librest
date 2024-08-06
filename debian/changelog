@@ -1,3 +1,57 @@
+librest (0.9.1-6) unstable; urgency=medium
+
+  * Build-Depend on dh-sequence-gir to fix missing dependencies from
+    the gir packages (Closes: #1033715) (LP: #2013267)
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Thu, 30 Mar 2023 15:52:01 -0400
+
+librest (0.9.1-5) unstable; urgency=medium
+
+  * Team upload.
+  * debian/control: Adjust -dev packages dependencies according to the
+    pkg-config file (Closes: #1033045)
+  * debian/control: Move the typelib files to the M-A path and mark the gir-*
+    packages as M-A: same
+  * debian/control: Mark the -dev packages as M-A:same
+  * debian/control: Bump Standards-Version to 4.6.2 (no further changes)
+  * debian/control: Mark librest-doc as M-A foreign
+
+ -- Laurent Bigonville <bigon@debian.org>  Thu, 16 Mar 2023 10:57:43 +0100
+
+librest (0.9.1-4) unstable; urgency=medium
+
+  * debian/patches/gitlab_goa_abort.patch: cherrypick a fix proposed upstream
+    and already included in Fedora to fix gnome-online-account segfaulting
+    sometime after suspend since libsoup3 (lp: #1990200)
+
+ -- Sebastien Bacher <seb128@ubuntu.com>  Tue, 22 Nov 2022 13:51:01 +0100
+
+librest (0.9.1-3) unstable; urgency=low
+
+  * Hand over to Gnome Team.
+  * Add Jeremy as Maintainers.
+  * Fix debian/*.shlibs and debian/*.symbols file.
+
+ -- Ying-Chun Liu (PaulLiu) <paulliu@debian.org>  Fri, 14 Oct 2022 06:33:08 +0800
+
+librest (0.9.1-2) unstable; urgency=medium
+
+  * Team upload
+  * Release to unstable
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Mon, 05 Sep 2022 15:07:22 -0400
+
+librest (0.9.1-1) experimental; urgency=medium
+
+  * Team upload
+  * New upstream release required for GNOME 43 (LP: #1960077)
+    - Update for API bump to 1.0
+    - Build with meson
+    - Switch to libsoup3
+  * Don't build the examples
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Tue, 23 Aug 2022 19:46:47 -0400
+
 librest (0.8.1-1.1) unstable; urgency=medium
 
   * Non maintainer upload by the Reproducible Builds team.
