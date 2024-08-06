@@ -4,7 +4,7 @@
  *
  * Authors: Rob Bradford <rob@linux.intel.com>
  *          Ross Burton <ross@linux.intel.com>
- * 
+ *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU Lesser General Public License,
  * version 2.1, as published by the Free Software Foundation.
@@ -28,9 +28,13 @@
 #include <rest/rest-proxy-call.h>
 #include <rest/rest-xml-node.h>
 #include <libsoup/soup.h>
-#include "glib-compat.h"
 
 G_BEGIN_DECLS
+
+typedef void (*RestMessageFinishedCallback) (SoupMessage *msg,
+                                             GBytes      *body,
+                                             GError      *error,
+                                             gpointer     user_data);
 
 typedef enum
 {
@@ -54,12 +58,23 @@ gboolean _rest_proxy_get_binding_required (RestProxy *proxy);
 const gchar *_rest_proxy_get_bound_url (RestProxy *proxy);
 void _rest_proxy_queue_message (RestProxy   *proxy,
                                 SoupMessage *message,
-                                SoupSessionCallback callback,
+                                GCancellable *cancellable,
+                                RestMessageFinishedCallback callback,
                                 gpointer user_data);
 void _rest_proxy_cancel_message (RestProxy   *proxy,
                                  SoupMessage *message);
-guint _rest_proxy_send_message (RestProxy   *proxy,
-                                SoupMessage *message);
+GBytes *_rest_proxy_send_message (RestProxy    *proxy,
+                                  SoupMessage  *message,
+                                  GCancellable *cancellable,
+                                  GError      **error);
+void _rest_proxy_send_message_async (RestProxy          *proxy,
+                                     SoupMessage        *message,
+                                     GCancellable       *cancellable,
+                                     GAsyncReadyCallback callback,
+                                     gpointer            user_data);
+GInputStream *_rest_proxy_send_message_finish (RestProxy    *proxy,
+                                               GAsyncResult *result,
+                                               GError      **error);
 
 RestXmlNode *_rest_xml_node_new (void);
 void         _rest_xml_node_reverse_children_siblings (RestXmlNode *node);

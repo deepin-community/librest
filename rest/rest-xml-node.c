@@ -200,12 +200,6 @@ rest_xml_node_unref (RestXmlNode *node)
   }
 }
 
-G_GNUC_DEPRECATED void
-rest_xml_node_free (RestXmlNode *node)
-{
-  rest_xml_node_unref (node);
-}
-
 /**
  * rest_xml_node_get_attr:
  * @node: a #RestXmlNode
@@ -221,6 +215,8 @@ const gchar *
 rest_xml_node_get_attr (RestXmlNode *node,
                         const gchar *attr_name)
 {
+  g_return_val_if_fail (attr_name != NULL, NULL);
+
   return g_hash_table_lookup (node->attrs, attr_name);
 }
 
@@ -244,6 +240,7 @@ rest_xml_node_find (RestXmlNode *start,
   const char *tag_interned;
 
   g_return_val_if_fail (start, NULL);
+  g_return_val_if_fail (tag != NULL, NULL);
   g_return_val_if_fail (start->ref_count > 0, NULL);
 
   tag_interned = g_intern_string (tag);
@@ -283,38 +280,62 @@ rest_xml_node_print (RestXmlNode *node)
 {
   GHashTableIter iter;
   gpointer       key, value;
-  char          *xml = g_strconcat ("<", node->name, NULL);
+  GList          *attrs = NULL;
+  GList          *children = NULL;
+  GList          *l;
+  GString        *xml = g_string_new (NULL);
   RestXmlNode   *n;
+
+  g_string_append (xml, "<");
+  g_string_append (xml, node->name);
 
   g_hash_table_iter_init (&iter, node->attrs);
   while (g_hash_table_iter_next (&iter, &key, &value))
-    xml = g_strconcat (xml, " ", key, "=\'", value, "\'", NULL);
+    {
+      char *attr = g_strdup_printf ("%s=\'%s\'", (char *)key, (char *)value);
+      attrs = g_list_prepend (attrs, attr);
+    }
 
-  xml = g_strconcat (xml, ">", NULL);
+  attrs = g_list_sort (attrs, (GCompareFunc) g_strcmp0);
+  for (l = attrs; l; l = l->next)
+    {
+      const char *attr = (const char *) l->data;
+      g_string_append_printf (xml, " %s", attr);
+    }
+
+  g_string_append (xml, ">");
 
   g_hash_table_iter_init (&iter, node->children);
   while (g_hash_table_iter_next (&iter, &key, &value))
+    children = g_list_prepend (children, key);
+
+  children = g_list_sort (children, (GCompareFunc) g_strcmp0);
+  for (l = children; l; l = l->next)
     {
+      const char *name = (const char *) l->data;
+      RestXmlNode *value = (RestXmlNode *) g_hash_table_lookup (node->children, name);
       char *child = rest_xml_node_print ((RestXmlNode *) value);
 
-      xml = g_strconcat (xml, child, NULL);
+      g_string_append (xml, child);
       g_free (child);
     }
 
   if (node->content)
-    xml = g_strconcat (xml, node->content, "</", node->name, ">", NULL);
-  else
-    xml = g_strconcat (xml, "</", node->name, ">", NULL);
+    g_string_append (xml, node->content);
+
+  g_string_append_printf (xml, "</%s>", node->name);
 
   for (n = node->next; n; n = n->next)
     {
       char *sibling = rest_xml_node_print (n);
 
-      xml = g_strconcat (xml, sibling, NULL);
+      g_string_append (xml, sibling);
       g_free (sibling);
     }
 
-  return xml;
+  g_list_free_full (attrs, g_free);
+  g_list_free (children);
+  return g_string_free (xml, FALSE);
 }
 
 /**
@@ -375,7 +396,11 @@ rest_xml_node_add_attr (RestXmlNode *node,
                         const char  *attribute,
                         const char  *value)
 {
-  g_return_if_fail (node && attribute && *attribute);
+  g_return_if_fail (node);
+  g_return_if_fail (attribute);
+  g_return_if_fail (*attribute);
+  g_return_if_fail (value);
+  g_return_if_fail (*value);
 
   g_hash_table_insert (node->attrs,
                        g_markup_escape_text (attribute, -1),
@@ -392,7 +417,9 @@ rest_xml_node_add_attr (RestXmlNode *node,
 void
 rest_xml_node_set_content (RestXmlNode *node, const char *value)
 {
-  g_return_if_fail (node && value && *value);
+  g_return_if_fail (node);
+  g_return_if_fail (value);
+  g_return_if_fail (*value);
 
   g_free (node->content);
   node->content = g_markup_escape_text (value, -1);

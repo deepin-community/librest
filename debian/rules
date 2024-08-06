@@ -7,17 +7,10 @@ DEB_UPSTREAM_VERSION := $(shell echo $(DEB_VERSION) | sed -e 's/-[^-]*$$//')
 GIT_URL = git://git.gnome.org/librest
 
 %:
-	dh $@ --with autoreconf
-
-override_dh_autoreconf:
-	dh_autoreconf ./autogen.sh
+	dh $@
 
 override_dh_auto_configure:
-	dh_auto_configure -- --enable-gtk-doc
-
-override_dh_makeshlibs:
-	dh_makeshlibs
-	dh_girepository
+	dh_auto_configure -- -Dexamples=false
 
 override_dh_auto_clean:
 	rm -rf docs/reference/rest/html

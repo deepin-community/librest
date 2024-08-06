@@ -30,33 +30,13 @@
 G_BEGIN_DECLS
 
 #define REST_TYPE_PROXY_CALL rest_proxy_call_get_type()
-
-#define REST_PROXY_CALL(obj) \
-  (G_TYPE_CHECK_INSTANCE_CAST ((obj), REST_TYPE_PROXY_CALL, RestProxyCall))
-
-#define REST_PROXY_CALL_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_CAST ((klass), REST_TYPE_PROXY_CALL, RestProxyCallClass))
-
-#define REST_IS_PROXY_CALL(obj) \
-  (G_TYPE_CHECK_INSTANCE_TYPE ((obj), REST_TYPE_PROXY_CALL))
-
-#define REST_IS_PROXY_CALL_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_TYPE ((klass), REST_TYPE_PROXY_CALL))
-
-#define REST_PROXY_CALL_GET_CLASS(obj) \
-  (G_TYPE_INSTANCE_GET_CLASS ((obj), REST_TYPE_PROXY_CALL, RestProxyCallClass))
-
-typedef struct _RestProxyCallPrivate RestProxyCallPrivate;
+G_DECLARE_DERIVABLE_TYPE (RestProxyCall, rest_proxy_call, REST, PROXY_CALL, GObject)
 
 /**
  * RestProxyCall:
  *
  * #RestProxyCall has no publicly available members.
  */
-typedef struct {
-  GObject parent;
-  RestProxyCallPrivate *priv;
-} RestProxyCall;
 
 /**
  * RestProxyCallClass:
@@ -68,7 +48,7 @@ typedef struct {
  * Class structure for #RestProxyCall for subclasses to implement specialised
  * behaviour.
  */
-typedef struct {
+struct _RestProxyCallClass {
   /*< private >*/
   GObjectClass parent_class;
   /*< public >*/
@@ -82,7 +62,7 @@ typedef struct {
   /*< private >*/
   /* padding for future expansion */
   gpointer _padding_dummy[7];
-} RestProxyCallClass;
+};
 
 #define REST_PROXY_CALL_ERROR rest_proxy_call_error_quark ()
 
@@ -97,8 +77,6 @@ typedef enum {
 } RestProxyCallError;
 
 GQuark rest_proxy_call_error_quark (void);
-
-GType rest_proxy_call_get_type (void);
 
 /* Functions for dealing with request */
 void rest_proxy_call_set_method (RestProxyCall *call,
@@ -150,25 +128,16 @@ void rest_proxy_call_remove_param (RestProxyCall *call,
 
 RestParams *rest_proxy_call_get_params (RestProxyCall *call);
 
-gboolean rest_proxy_call_run (RestProxyCall *call,
-                              GMainLoop    **loop,
-                              GError       **error);
-
 typedef void (*RestProxyCallAsyncCallback)(RestProxyCall *call,
                                            const GError  *error,
                                            GObject       *weak_object,
                                            gpointer       userdata);
 
-gboolean rest_proxy_call_async (RestProxyCall                *call,
-                                RestProxyCallAsyncCallback    callback,
-                                GObject                      *weak_object,
-                                gpointer                      userdata,
-                                GError                      **error);
-
 void rest_proxy_call_invoke_async (RestProxyCall       *call,
                                    GCancellable        *cancellable,
                                    GAsyncReadyCallback  callback,
                                    gpointer             user_data);
+
 gboolean rest_proxy_call_invoke_finish (RestProxyCall *call,
                                         GAsyncResult  *result,
                                         GError       **error);

@@ -28,7 +28,6 @@
 #include <libsoup/soup.h>
 #include <rest/rest-proxy.h>
 
-static int errors = 0;
 static GMainLoop *loop = NULL;
 
 #define NUM_CHUNKS 20
@@ -40,9 +39,15 @@ static SoupServer *server;
 static gboolean
 send_chunks (gpointer user_data)
 {
-  SoupMessage *msg = SOUP_MESSAGE (user_data);
   guint i;
   guint8 data[SIZE_CHUNK];
+#ifdef WITH_SOUP_2
+  SoupMessage *msg = SOUP_MESSAGE (user_data);
+  SoupMessageBody *response_body = msg->response_body;
+#else
+  SoupServerMessage *msg = SOUP_SERVER_MESSAGE (user_data);
+  SoupMessageBody *response_body = soup_server_message_get_response_body (msg);
+#endif
 
   for (i = 0; i < SIZE_CHUNK; i++)
   {
@@ -50,12 +55,12 @@ send_chunks (gpointer user_data)
     server_count++;
   }
 
-  soup_message_body_append (msg->response_body, SOUP_MEMORY_COPY, data, SIZE_CHUNK);
+  soup_message_body_append (response_body, SOUP_MEMORY_COPY, data, SIZE_CHUNK);
   soup_server_unpause_message (server, msg);
 
   if (server_count == NUM_CHUNKS * SIZE_CHUNK)
   {
-    soup_message_body_complete (msg->response_body);
+    soup_message_body_complete (response_body);
     return FALSE;
   } else {
     return TRUE;
@@ -63,18 +68,32 @@ send_chunks (gpointer user_data)
 }
 
 static void
+#ifdef WITH_SOUP_2
 server_callback (SoupServer *server, SoupMessage *msg,
                  const char *path, GHashTable *query,
                  SoupClientContext *client, gpointer user_data)
+#else
+server_callback (SoupServer *server, SoupServerMessage *msg,
+                 const char *path, GHashTable *query, gpointer user_data)
+#endif
 {
-  if (g_str_equal (path, "/stream")) {
-    soup_message_set_status (msg, SOUP_STATUS_OK);
-    soup_message_headers_set_encoding (msg->response_headers,
-                                       SOUP_ENCODING_CHUNKED);
-    soup_server_pause_message (server, msg);
+#ifdef WITH_SOUP_2
+  SoupMessageHeaders *response_headers = msg->response_headers;
+#else
+  SoupMessageHeaders *response_headers = soup_server_message_get_response_headers (msg);
+#endif
 
-    g_idle_add (send_chunks, msg);
-  }
+  g_assert_cmpstr (path, ==, "/stream");
+#ifdef WITH_SOUP_2
+  soup_message_set_status (msg, SOUP_STATUS_OK);
+#else
+  soup_server_message_set_status (msg, SOUP_STATUS_OK, NULL);
+#endif
+  soup_message_headers_set_encoding (response_headers,
+                                     SOUP_ENCODING_CHUNKED);
+  soup_server_pause_message (server, msg);
+
+  g_idle_add (send_chunks, msg);
 }
 
 static void
@@ -87,47 +106,21 @@ _call_continuous_cb (RestProxyCall *call,
 {
   guint i;
 
-  if (error)
-  {
-    g_printerr ("Error: %s\n", error->message);
-    errors++;
-    goto out;
-  }
+  g_assert_no_error (error);
+  g_assert (REST_IS_PROXY (weak_object));
 
-  if (!REST_IS_PROXY (weak_object))
-  {
-    g_printerr ("weak object not as expected\n");
-    errors++;
-    goto out;
-  }
-
-  if (buf == NULL && len == 0)
-  {
-    if (client_count < NUM_CHUNKS * SIZE_CHUNK)
-    {
-      g_printerr ("stream ended prematurely\n");
-      errors++;
-    }
-    goto out;
-  }
+  if (buf == NULL || len == 0)
+    g_assert (client_count == NUM_CHUNKS * SIZE_CHUNK);
 
   for (i = 0; i < len; i++)
   {
-    if (buf[i] != client_count)
-    {
-      g_printerr ("stream data not as expected (got %d, expected %d)\n",
-                  (gint) buf[i], client_count);
-      errors++;
-      goto out;
-    }
-
+    g_assert_cmpint (buf[i], ==, client_count);
     client_count++;
   }
 
-  return;
-out:
-  g_main_loop_quit (loop);
-  return;
+
+  if (client_count == NUM_CHUNKS * SIZE_CHUNK)
+    g_main_loop_quit (loop);
 }
 
 static void
@@ -135,46 +128,67 @@ stream_test (RestProxy *proxy)
 {
   RestProxyCall *call;
   GError *error = NULL;
+  gboolean result;
 
   call = rest_proxy_new_call (proxy);
   rest_proxy_call_set_function (call, "stream");
 
-  if (!rest_proxy_call_continuous (call,
-                                   _call_continuous_cb,
-                                   (GObject *)proxy,
-                                   NULL,
-                                   &error))
-  {
-    g_printerr ("Making stream failed: %s", error->message);
-    g_error_free (error);
-    errors++;
-    return;
-  }
+  result = rest_proxy_call_continuous (call,
+                                       _call_continuous_cb,
+                                       (GObject *)proxy,
+                                       NULL,
+                                       &error);
+
+  g_assert_no_error (error);
+  g_assert (result);
 
   g_object_unref (call);
+}
+
+static void
+continuous ()
+{
+  char *url;
+  RestProxy *proxy;
+  GError *error = NULL;
+  GSList *uris;
+
+
+  server = soup_server_new (NULL, NULL);
+  soup_server_listen_local (server, 0, SOUP_SERVER_LISTEN_IPV4_ONLY, &error);
+  g_assert_no_error (error);
+
+  soup_server_add_handler (server, NULL, server_callback, NULL, NULL);
+
+  uris = soup_server_get_uris (server);
+  g_assert (g_slist_length (uris) > 0);
+
+#ifdef WITH_SOUP_2
+  url = soup_uri_to_string (uris->data, FALSE);
+#else
+  url = g_uri_to_string (uris->data);
+#endif
+
+  loop = g_main_loop_new (NULL, FALSE);
+
+  proxy = rest_proxy_new (url, FALSE);
+  stream_test (proxy);
+#ifdef WITH_SOUP_2
+  g_slist_free_full (uris, (GDestroyNotify)soup_uri_free);
+#else
+  g_slist_free_full (uris, (GDestroyNotify)g_uri_unref);
+#endif
+
+  g_main_loop_run (loop);
+  g_free (url);
+  g_main_loop_unref (loop);
 }
 
 int
 main (int argc, char **argv)
 {
-  char *url;
-  RestProxy *proxy;
+  g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/proxy/continuous", continuous);
 
-#if !GLIB_CHECK_VERSION (2, 36, 0)
-  g_type_init ();
-#endif
-  loop = g_main_loop_new (NULL, FALSE);
-
-  server = soup_server_new (NULL);
-  soup_server_add_handler (server, NULL, server_callback, NULL, NULL);
-  soup_server_run_async (server);
-
-  url = g_strdup_printf ("http://127.0.0.1:%d/", soup_server_get_port (server));
-  proxy = rest_proxy_new (url, FALSE);
-  g_free (url);
-
-  stream_test (proxy);
-  g_main_loop_run (loop);
-
-  return errors != 0;
+  return g_test_run ();
 }

@@ -1,7 +1,4 @@
-# Compulsory line, this is a version 4 file
 version=4
-
-# GitLab hosted projects
-opts="filenamemangle=s%(?:.*?)?v?(\d[\d.]*)\.tar\.bz2%librest-$1.tar.bz2%" \
-   https://gitlab.gnome.org/GNOME/librest/tags \
-   (?:.*?/)?librest-(\d[\d.]*)\.tar\.bz2 debian uupdate
+opts="searchmode=plain, uversionmangle=s/\.(alpha|beta|rc)/~$1/, downloadurlmangle=s|cache.json||" \
+https://download.gnome.org/sources/rest/cache.json \
+	[\d.]+/rest-([\d.]+)@ARCHIVE_EXT@

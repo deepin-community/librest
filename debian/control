@@ -1,25 +1,31 @@
 Source: librest
 Section: libs
 Priority: optional
-Maintainer: Ying-Chun Liu (PaulLiu) <paulliu@debian.org>
+Maintainer: Debian GNOME Maintainers <pkg-gnome-maintainers@lists.alioth.debian.org>
+Uploaders: Jeremy Bicha <jbicha@ubuntu.com>,
+           Ying-Chun Liu (PaulLiu) <paulliu@debian.org>
 Build-Depends: autoconf,
                automake,
                ca-certificates,
-               debhelper (>= 10),
+               debhelper (>= 11),
+               dh-sequence-gir,
+               gi-docgen,
                gir1.2-freedesktop,
                gir1.2-glib-2.0,
+               gir1.2-json-1.0,
                gobject-introspection (>= 0.9.12),
                gtk-doc-tools,
                libgirepository1.0-dev (>= 0.9.12),
                libglib2.0-dev (>= 2.27),
-               libsoup-gnome2.4-dev,
-               libsoup2.4-dev (>= 2.30),
+               libjson-glib-dev,
+               libsoup-3.0-dev,
                libtool,
-               libxml2-dev
-Standards-Version: 4.2.1
+               libxml2-dev,
+               meson (>= 0.47)
+Standards-Version: 4.6.2
 Homepage: https://wiki.gnome.org/Projects/Librest
 
-Package: librest-0.7-0
+Package: librest-1.0-0
 Architecture: any
 Pre-Depends: ${misc:Pre-Depends}
 Depends: ${misc:Depends}, ${shlibs:Depends}
@@ -32,11 +38,14 @@ Description: REST service access library
 Package: librest-dev
 Architecture: any
 Section: libdevel
-Depends: gir1.2-rest-0.7 (= ${binary:Version}),
-         librest-0.7-0 (= ${binary:Version}),
-         libsoup2.4-dev,
+Depends: gir1.2-rest-1.0 (= ${binary:Version}),
+         libglib2.0-dev (>= 2.44),
+         libjson-glib-dev,
+         librest-1.0-0 (= ${binary:Version}),
+         libsoup-3.0-dev (>= 2.99.2),
          libxml2-dev,
          ${misc:Depends}
+Multi-Arch: same
 Description: REST service access library (development headers)
  This library was designed to make it easier to access web services that
  claim to be "RESTful".  It includes convenience wrappers for libsoup and
@@ -44,10 +53,11 @@ Description: REST service access library (development headers)
  .
  This package contains the development headers.
 
-Package: gir1.2-rest-0.7
+Package: gir1.2-rest-1.0
 Section: introspection
 Architecture: any
 Depends: ${gir:Depends}, ${misc:Depends}, ${shlibs:Depends}
+Multi-Arch: same
 Description: REST service access library (introspection files)
  This library was designed to make it easier to access web services that
  claim to be "RESTful".  It includes convenience wrappers for libsoup and
@@ -63,6 +73,7 @@ Section: doc
 Architecture: all
 Depends: ${misc:Depends}
 Suggests: librest-dev
+Multi-Arch: foreign
 Description: REST service access library (documentation)
  This library was designed to make it easier to access web services that
  claim to be "RESTful".  It includes convenience wrappers for libsoup and
@@ -70,7 +81,7 @@ Description: REST service access library (documentation)
  .
  This package contains the documentation
 
-Package: librest-extras-0.7-0
+Package: librest-extras-1.0-0
 Architecture: any
 Pre-Depends: ${misc:Pre-Depends}
 Depends: ${misc:Depends}, ${shlibs:Depends}
@@ -84,10 +95,15 @@ Description: REST service access library extra components
 Package: librest-extras-dev
 Section: libdevel
 Architecture: any
-Depends: gir1.2-restextras-0.7 (=${binary:Version}),
-         librest-dev,
-         librest-extras-0.7-0 (=${binary:Version}),
+Depends: gir1.2-restextras-1.0 (=${binary:Version}),
+         libglib2.0-dev (>= 2.44),
+         libjson-glib-dev,
+         librest-dev (=${binary:Version}),
+         librest-extras-1.0-0 (=${binary:Version}),
+         libsoup-3.0-dev (>= 2.99.2),
+         libxml2-dev,
          ${misc:Depends}
+Multi-Arch: same
 Description: REST service access library extra components (development headers)
  This library was designed to make it easier to access web services that
  claim to be "RESTful".  It includes convenience wrappers for libsoup and
@@ -96,12 +112,13 @@ Description: REST service access library extra components (development headers)
  .
  This package contains the development headers.
 
-Package: gir1.2-restextras-0.7
+Package: gir1.2-restextras-1.0
 Section: introspection
 Architecture: any
 Depends: ${gir:Depends}, ${misc:Depends}, ${shlibs:Depends}
 Replaces: gir1.2-rest-extras-0.7 (<< 0.8.1)
 Breaks: gir1.2-rest-extras-0.7 (<< 0.8.1)
+Multi-Arch: same
 Description: REST service access library extra components (introspectionfiles)
  This library was designed to make it easier to access web services that
  claim to be "RESTful".  It includes convenience wrappers for libsoup and

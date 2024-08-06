@@ -27,18 +27,35 @@
 #include <libsoup/soup.h>
 #include <rest/rest-proxy.h>
 
-static volatile int errors = 0;
+const int N_THREADS = 10;
+
+static volatile int threads_done = 0;
 static const gboolean verbose = FALSE;
 
+GMainLoop *main_loop;
+SoupServer *server;
+
 static void
+#ifdef WITH_SOUP_2
 server_callback (SoupServer *server, SoupMessage *msg,
                  const char *path, GHashTable *query,
                  SoupClientContext *client, gpointer user_data)
+#else
+server_callback (SoupServer *server, SoupServerMessage *msg,
+                 const char *path, GHashTable *query, gpointer user_data)
+#endif
 {
-  if (g_str_equal (path, "/ping")) {
-    soup_message_set_status (msg, SOUP_STATUS_OK);
-  } else {
-    soup_message_set_status (msg, SOUP_STATUS_NOT_IMPLEMENTED);
+  g_assert_cmpstr (path, ==, "/ping");
+
+#ifdef WITH_SOUP_2
+  soup_message_set_status (msg, SOUP_STATUS_OK);
+#else
+  soup_server_message_set_status (msg, SOUP_STATUS_OK, NULL);
+#endif
+  g_atomic_int_add (&threads_done, 1);
+
+  if (threads_done == N_THREADS) {
+    g_main_loop_quit (main_loop);
   }
 }
 
@@ -50,62 +67,76 @@ func (gpointer data)
   const char *url = data;
   GError *error = NULL;
 
+
   proxy = rest_proxy_new (url, FALSE);
   call = rest_proxy_new_call (proxy);
   rest_proxy_call_set_function (call, "ping");
 
-  if (!rest_proxy_call_sync (call, &error)) {
-    g_printerr ("Call failed: %s\n", error->message);
-    g_error_free (error);
-    g_atomic_int_add (&errors, 1);
-    goto done;
-  }
+  g_assert (rest_proxy_call_sync (call, &error));
+  g_assert_no_error (error);
 
-  if (rest_proxy_call_get_status_code (call) != SOUP_STATUS_OK) {
-    g_printerr ("Wrong response code, got %d\n", rest_proxy_call_get_status_code (call));
-    g_atomic_int_add (&errors, 1);
-    goto done;
-  }
+  g_assert_cmpint (rest_proxy_call_get_status_code (call), ==, SOUP_STATUS_OK);
 
   if (verbose)
     g_print ("Thread %p done\n", g_thread_self ());
 
- done:
   g_object_unref (call);
   g_object_unref (proxy);
+
   return NULL;
+}
+
+
+static void ping ()
+{
+  GThread *threads[N_THREADS];
+  GError *error = NULL;
+  char *url;
+  int i;
+  GSList *uris;
+
+  server = soup_server_new (NULL, NULL);
+  soup_server_listen_local (server, 0, SOUP_SERVER_LISTEN_IPV4_ONLY, &error);
+  g_assert_no_error (error);
+
+  soup_server_add_handler (server, "/ping", server_callback,
+                           NULL, NULL);
+
+  uris = soup_server_get_uris (server);
+  g_assert (g_slist_length (uris) > 0);
+
+#ifdef WITH_SOUP_2
+  url = soup_uri_to_string (uris->data, FALSE);
+#else
+  url = g_uri_to_string (uris->data);
+#endif
+
+  main_loop = g_main_loop_new (NULL, TRUE);
+
+  for (i = 0; i < N_THREADS; i++) {
+    threads[i] = g_thread_new ("client thread", func, url);
+    if (verbose)
+      g_print ("Starting thread %p\n", threads[i]);
+  }
+
+  g_main_loop_run (main_loop);
+
+  g_free (url);
+#ifdef WITH_SOUP_2
+  g_slist_free_full (uris, (GDestroyNotify)soup_uri_free);
+#else
+  g_slist_free_full (uris, (GDestroyNotify)g_uri_unref);
+#endif
+  g_object_unref (server);
+  g_main_loop_unref (main_loop);
 }
 
 int
 main (int argc, char **argv)
 {
-  SoupServer *server;
-  GThread *threads[10];
-  char *url;
-  int i;
 
-#if !GLIB_CHECK_VERSION (2, 36, 0)
-  g_type_init ();
-#endif
+  g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/threaded/ping", ping);
 
-  server = soup_server_new (NULL);
-  soup_server_add_handler (server, NULL, server_callback, NULL, NULL);
-  url = g_strdup_printf ("http://127.0.0.1:%d/", soup_server_get_port (server));
-
-  g_thread_create ((GThreadFunc)soup_server_run, server, FALSE, NULL);
-
-  for (i = 0; i < G_N_ELEMENTS (threads); i++) {
-    threads[i] = g_thread_create (func, url, TRUE, NULL);
-    if (verbose)
-      g_print ("Starting thread %p\n", threads[i]);
-  }
-
-  for (i = 0; i < G_N_ELEMENTS (threads); i++) {
-    g_thread_join (threads[i]);
-  }
-
-  soup_server_quit (server);
-  g_free (url);
-
-  return errors != 0;
+  return g_test_run ();
 }
